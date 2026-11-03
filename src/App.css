@@ -1,0 +1,7 @@
+* { box-sizing: border-box; }
+body { margin: 0; background: #101623; color: #e8eefb; font-family: system-ui, sans-serif; }
+main { max-width: 70rem; margin: auto; padding: 2rem; }
+header { display: flex; flex-wrap: wrap; gap: 1rem; justify-content: space-between; align-items: center; }
+label { display: flex; gap: .6rem; align-items: center; }
+select { font: inherit; color: inherit; background: #273d5d; padding: .4rem; border: 1px solid #7184a5; border-radius: .3rem; }
+section { margin-top: 1.5rem; background: #192235; padding: 1.25rem; border-radius: .75rem; }
