@@ -17,18 +17,20 @@
   display: flex; justify-content: center; align-items: center; flex: 0 0 28px;
 }
 .mirror-titlebar, .mirror-side {
-  background: color-mix(in srgb, #20212b var(--mirror-opacity), transparent);
+  background: color-mix(in srgb, var(--theme-panel, #20212b) var(--mirror-opacity), transparent);
 }
-.mirror-caption-actions { display: flex; margin-left: auto; }
-.mirror-caption-actions .icon-button { min-width: 29px; height: 27px; border: 1px solid transparent; }
-.mirror-caption-actions { gap: 2px; }
+.mirror-caption-actions { display: flex; gap: 2px; margin-left: auto; --caption-button-size: 28px; }
+.mirror-caption-actions .icon-button {
+  width: var(--caption-button-size); min-width: var(--caption-button-size); height: var(--caption-button-size);
+  padding: 0; border: 1px solid transparent;
+}
 .mirror-caption-actions .icon-button svg { width: 15px; height: 15px; }
 .mirror-caption-actions .icon-button:last-child:hover { background: #723c4b; }
 .mirror-body { display: flex; min-width: 0; min-height: 0; flex: 1; }
 .mirror-video {
   flex: 1; min-width: 0; min-height: 0; display: flex;
   padding: var(--mirror-background-inset);
-  background: color-mix(in srgb, #20212b var(--mirror-opacity), transparent);
+  background: color-mix(in srgb, var(--theme-panel, #20212b) var(--mirror-opacity), transparent);
 }
 /* Keep the embedded video away from the transparent host's clipped edges. */
 .mirror-shell:not(.is-fullscreen) .mirror-video {
@@ -53,7 +55,7 @@
 .mirror-tile.insert-before::before { top: 0; }
 .mirror-tile.insert-after::after, .mirror-list.insert-after::after { bottom: 0; }
 .mirror-more {
-  flex: none; overflow: auto; background: color-mix(in srgb, #20212b var(--mirror-opacity), transparent);
+  flex: none; overflow: auto; background: color-mix(in srgb, var(--theme-panel, #20212b) var(--mirror-opacity), transparent);
 }
 .mirror-more { width: 58px; padding: 7px 4px; scrollbar-width: none; border-left: 1px solid #ffffff18; }
 .mirror-more .icon-button { justify-content: center; }
@@ -85,9 +87,12 @@
 .mirror-apps img { width: 100%; height: 100%; object-fit: contain; border-radius: 5px; }
 .mirror-empty-menu { display: grid; place-items: center; min-height: 36px; }
 .mirror-empty-menu svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.65; }
-.mirror-color-input { width: 55px; cursor: pointer; }
 
 
 .mirror-device-title { display: flex; min-width: 0; align-items: center; gap: 7px; }
 .mirror-device-title > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.mirror-fps { flex: none; color: #bbb8ca; font-size: 10px; font-variant-numeric: tabular-nums; }
+.icon-button.mirror-fps {
+  flex: none; width: var(--control-height); padding: 0;
+  user-select: none; cursor: default; font-size: 12px; font-variant-numeric: tabular-nums;
+}
+.mirror-recording { color: #ff919d; margin-left: 7px; font-size: 11px; }

@@ -5,7 +5,8 @@ use std::{
     fs,
     sync::{Arc, Mutex, atomic::{AtomicU32, AtomicU64, Ordering}},
 };
-use tauri::{Emitter, AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use crate::profile::StartupPlacement;
+use tauri::{Emitter, AppHandle, Manager, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use windows_sys::Win32::{
     Foundation::{GetLastError, HWND, POINT, RECT, SetLastError},
     Graphics::Gdi::{ClientToScreen, CreateRectRgn, CreateRoundRectRgn, DeleteObject, EqualRgn, GetWindowRgn, ScreenToClient, SetWindowRgn},
@@ -14,13 +15,13 @@ use windows_sys::Win32::{
     UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
     UI::WindowsAndMessaging::{
         ChildWindowFromPointEx, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, GWL_STYLE, GetAncestor, GA_ROOT, GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO, GetParent, GetWindowRect, SetCursorPos, WindowFromPoint, IsWindowVisible, IsIconic, GetWindowLongPtrW, HWND_TOP, IsWindow, PostMessageW,
-        SW_HIDE, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetParent, SetWindowLongPtrW,
+        SW_HIDE, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetParent, SetWindowLongPtrW,
         SetWindowPos, ShowWindowAsync, WM_APP, WM_CLOSE, WM_EXITSIZEMOVE, WM_MOUSEMOVE, WM_MOVE, WM_NCDESTROY, WM_SIZE, WM_KEYDOWN, WM_KEYUP, WS_CHILD, WS_POPUP,
     },
 };
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
-struct Placement {
+pub(crate) struct Placement {
     x: i32,
     y: i32,
     width: u32,
@@ -37,29 +38,65 @@ fn read_placements(path: &std::path::Path) -> BTreeMap<String, Placement> {
     fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
 }
 
-fn restore_placement(shell: &WebviewWindow, key: &str) {
+#[tauri::command]
+pub(crate) fn last_mirror_placement(app: AppHandle, serial: String) -> Result<Option<Placement>, &'static str> {
+    let key = serde_json::to_string(&(serial, Option::<String>::None)).map_err(|_| "sessionError")?;
+    let _lock = PLACEMENTS.lock().map_err(|_| "sessionError")?;
+    Ok(read_placements(&placement_path(&app)?).get(&key).copied())
+}
+
+fn restore_placement(shell: &WebviewWindow, key: &str, startup: StartupPlacement) {
     let saved = PLACEMENTS.lock().ok().and_then(|_lock| {
         let path = placement_path(shell.app_handle()).ok()?;
         read_placements(&path).get(key).copied()
     });
-    let Some(saved) = saved else { return; };
-    if saved.width < 150 || saved.height < 150 || saved.width > 16384 || saved.height > 16384 {
-        return;
-    }
+    let (Ok(default_pos), Ok(default_size)) = (shell.outer_position(), shell.inner_size()) else { return; };
     let Ok(monitors) = shell.available_monitors() else { return; };
-    if !monitors.iter().any(|monitor| {
+    let visible = |placement: Placement| monitors.iter().any(|monitor| {
         let area = monitor.work_area();
         let left = i64::from(area.position.x);
         let top = i64::from(area.position.y);
-        let x = i64::from(saved.x);
-        let y = i64::from(saved.y);
-        x + i64::from(saved.width) >= left + 100 && x <= left + i64::from(area.size.width) - 100
+        let x = i64::from(placement.x);
+        let y = i64::from(placement.y);
+        x + i64::from(placement.width) >= left + 100 && x <= left + i64::from(area.size.width) - 100
             && y >= top && y <= top + i64::from(area.size.height) - 38
-    }) {
+    });
+    let saved = saved.filter(|p| (150..=16384).contains(&p.width)
+        && (150..=16384).contains(&p.height) && visible(*p));
+    if saved.is_none() && startup.is_empty() {
         return;
     }
-    let _ = shell.set_size(PhysicalSize::new(saved.width, saved.height));
-    let _ = shell.set_position(PhysicalPosition::new(saved.x, saved.y));
+    let base = saved.unwrap_or(Placement {
+        x: default_pos.x, y: default_pos.y, width: default_size.width, height: default_size.height,
+    });
+    let requested = Placement {
+        x: startup.startup_x.unwrap_or(base.x),
+        y: startup.startup_y.unwrap_or(base.y),
+        width: startup.startup_width.unwrap_or(base.width),
+        height: startup.startup_height.unwrap_or(base.height),
+    };
+    let position = if visible(requested) {
+        Some((requested.x, requested.y))
+    } else {
+        saved.filter(|saved| visible(Placement { x: saved.x, y: saved.y, ..requested }))
+            .map(|saved| (saved.x, saved.y))
+    };
+    let custom_size = startup.startup_width.is_some() || startup.startup_height.is_some();
+    if custom_size {
+        let _ = shell.set_min_size(Some(PhysicalSize::new(160, 310)));
+    }
+    if let Ok(hwnd) = shell.hwnd() {
+        let hwnd = hwnd.0 as usize;
+        let (x, y) = position.unwrap_or_default();
+        let mut flags = SWP_NOACTIVATE | SWP_NOZORDER;
+        if position.is_none() { flags |= SWP_NOMOVE; }
+        if saved.is_none() && !custom_size { flags |= SWP_NOSIZE; }
+        // Apply the complete physical rectangle before showing the undecorated window.
+        let _ = shell.run_on_main_thread(move || unsafe {
+            SetWindowPos(hwnd as HWND, std::ptr::null_mut(), x, y,
+                requested.width as i32, requested.height as i32, flags);
+        });
+    }
 }
 
 pub(crate) fn save_placement(shell: &WebviewWindow, mirror: &Mirror) -> Result<(), &'static str> {
@@ -89,7 +126,9 @@ pub(crate) struct MirrorOptions {
     pub control_enabled: bool,
     pub virtual_screen: bool,
     pub follow: bool,
-    pub fps: Arc<AtomicU32>,
+    pub startup: StartupPlacement,
+    fps: Arc<AtomicU32>,
+    frame_size: Arc<AtomicU32>,
 }
 
 impl MirrorOptions {
@@ -98,13 +137,19 @@ impl MirrorOptions {
             "--window-borderless", "--window-x=-30000", "--window-y=-30000",
             "--shortcut-mod=rctrl,lalt,lsuper", "--print-fps",
         ]).stdout(Stdio::piped()).stderr(Stdio::piped());
-        Self { fullscreen, top, control_enabled, virtual_screen, follow, fps: Arc::new(AtomicU32::new(u32::MAX)) }
+        Self {
+            fullscreen, top, control_enabled, virtual_screen, follow, startup: StartupPlacement::default(),
+            fps: Arc::new(AtomicU32::new(u32::MAX)), frame_size: Arc::default(),
+        }
     }
 
-    pub(crate) fn watch_fps(&self, child: &mut Child) {
-        fn read(output: impl Read + Send + 'static, fps: Arc<AtomicU32>) {
+    pub(crate) fn watch_stats(&self, child: &mut Child) {
+        fn read(output: impl Read + Send + 'static, fps: Arc<AtomicU32>, frame_size: Arc<AtomicU32>) {
             std::thread::spawn(move || {
                 for line in BufReader::new(output).lines().map_while(Result::ok) {
+                    if let Some((width, height)) = texture_size(&line) {
+                        frame_size.store((u32::from(width) << 16) | u32::from(height), Ordering::Relaxed);
+                    }
                     if let Some((prefix, _)) = line.split_once(" fps")
                         && let Some(count) = prefix.split_whitespace().last().and_then(|word| word.parse().ok())
                     {
@@ -113,13 +158,38 @@ impl MirrorOptions {
                 }
             });
         }
-        if let Some(stdout) = child.stdout.take() { read(stdout, self.fps.clone()); }
-        if let Some(stderr) = child.stderr.take() { read(stderr, self.fps.clone()); }
+        if let Some(stdout) = child.stdout.take() { read(stdout, self.fps.clone(), self.frame_size.clone()); }
+        if let Some(stderr) = child.stderr.take() { read(stderr, self.fps.clone(), self.frame_size.clone()); }
     }
 
-    pub(crate) fn fps(&self) -> Option<u32> {
+    pub(crate) fn stats(&self) -> (Option<u32>, Option<[u16; 2]>) {
         let count = self.fps.load(Ordering::Relaxed);
-        (count != u32::MAX).then_some(count)
+        let size = self.frame_size.load(Ordering::Relaxed);
+        ((count != u32::MAX).then_some(count), (size != 0).then_some([(size >> 16) as u16, size as u16]))
+    }
+}
+
+fn texture_size(line: &str) -> Option<(u16, u16)> {
+    let (suffix, size) = line.trim().strip_prefix("INFO: Texture")?.split_once(':')?;
+    if !suffix.is_empty() && !(suffix.starts_with(" (") && suffix.ends_with(')')) {
+        return None;
+    }
+    let (width, height) = size.trim().split_once('x')?;
+    let width = width.parse::<u16>().ok()?;
+    let height = height.parse::<u16>().ok()?;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::texture_size;
+
+    #[test]
+    fn reads_video_dimensions_from_software_and_hardware_renderers() {
+        assert_eq!(texture_size("INFO: Texture: 1440x3200"), Some((1440, 3200)));
+        assert_eq!(texture_size("INFO: Texture (D3D11VA): 1440x3200"), Some((1440, 3200)));
+        assert_eq!(texture_size("INFO: Texture: 1440x0"), None);
+        assert_eq!(texture_size("INFO: Texture creation failed: 1440x3200"), None);
     }
 }
 
@@ -195,8 +265,16 @@ pub(crate) fn create(app: &AppHandle, mirror: &Mirror, title: &str) -> Result<()
     std::thread::spawn(move || {
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
         let mut escape_was_down = false;
+        let mut was_active = false;
         while unsafe { IsWindow(video as HWND) } != 0 {
-            let active = unsafe { GetForegroundWindow() } == host as HWND;
+            let foreground = unsafe { GetForegroundWindow() };
+            let active = foreground == host as HWND;
+            if !foreground.is_null() || unsafe { IsIconic(host as HWND) } != 0 {
+                if was_active && !active {
+                    let _ = app.emit_to(&label, &format!("mirror-blur-{label}"), ());
+                }
+                was_active = active;
+            }
             let escape = active && unsafe { GetAsyncKeyState(VK_ESCAPE as i32) } < 0;
             if escape && !escape_was_down {
                 let _ = app.emit_to(&label, &format!("mirror-escape-{label}"), ());
@@ -214,7 +292,7 @@ pub(crate) fn create(app: &AppHandle, mirror: &Mirror, title: &str) -> Result<()
         }
     });
     if !mirror.options.fullscreen {
-        restore_placement(&shell, &mirror.placement_key);
+        restore_placement(&shell, &mirror.placement_key, mirror.options.startup);
     }
     shell.show().map_err(|_| "mirrorFrameFailed")?;
     let _ = shell.set_focus();

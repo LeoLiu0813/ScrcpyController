@@ -32,6 +32,7 @@ pub struct TrayState {
 #[derive(Default, Clone)]
 struct Settings {
     english: bool,
+    exit_on_close: bool,
     devices: Vec<TrayDevice>,
     removed: Vec<String>,
 }
@@ -102,7 +103,12 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 && !quitting(main_for_event.app_handle())
             {
                 api.prevent_close();
-                let _ = main_for_event.hide();
+                let app = main_for_event.app_handle();
+                if exit_on_close(app) {
+                    quit(app);
+                } else {
+                    let _ = main_for_event.hide();
+                }
             }
         });
     }
@@ -299,14 +305,20 @@ pub fn status(app: &AppHandle) -> Result<serde_json::Value, &'static str> {
     let state = app.state::<TrayState>();
     let rows = state.rows.lock().map_err(|_| "sessionError")?;
     Ok(
-        serde_json::json!({ "installed": app.tray_by_id(ID).is_some(), "mainVisible": visible, "devices": *rows }),
+        serde_json::json!({ "installed": app.tray_by_id(ID).is_some(), "mainVisible": visible,
+            "exitOnClose": exit_on_close(app), "devices": *rows }),
     )
+}
+
+fn exit_on_close(app: &AppHandle) -> bool {
+    app.state::<TrayState>().settings.lock().is_ok_and(|settings| settings.exit_on_close)
 }
 
 #[tauri::command]
 pub fn tray_sync(
     window: WebviewWindow,
     english: bool,
+    exit_on_close: Option<bool>,
     devices: Vec<TrayDevice>,
     removed: Vec<String>,
 ) -> Result<(), &'static str> {
@@ -316,6 +328,7 @@ pub fn tray_sync(
     let state = window.state::<TrayState>();
     *state.settings.lock().map_err(|_| "sessionError")? = Settings {
         english,
+        exit_on_close: exit_on_close.unwrap_or(false),
         devices,
         removed,
     };
@@ -323,5 +336,5 @@ pub fn tray_sync(
 }
 
 pub fn hide(app: &AppHandle) -> Result<(), &'static str> {
-    main_window(app)?.close().map_err(|_| "windowPending")
+    main_window(app)?.hide().map_err(|_| "windowPending")
 }

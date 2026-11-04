@@ -27,7 +27,7 @@ const HELP: &str = "安卓控制台命令行\n\
   screenshot <设备序列号>          截图并返回路径与尺寸\n\
   tap <设备序列号> <横坐标> <纵坐标> <截图宽> <截图高>\n\
   toolbar <设备序列号> <操作>      控制和检查右侧快捷栏\n\
-  tray <status|show|hide|device|exit>  托盘状态与操作\n\
+  tray <status|show|hide|device|lock|exit>  托盘状态与操作\n\
   --json                          输出单行结构化结果";
 
 fn parse(args: &[String]) -> Option<Request> {
@@ -43,7 +43,7 @@ fn parse(args: &[String]) -> Option<Request> {
             command: operation.clone(),
             serial: None,
         },
-        [command, operation, serial] if command == "tray" && operation == "device" => {
+        [command, operation, serial] if command == "tray" && matches!(operation.as_str(), "device" | "lock") => {
             Request::Tray {
                 command: operation.clone(),
                 serial: Some(serial.clone()),
@@ -110,7 +110,7 @@ fn start_controller(integrated: bool) -> io::Result<()> {
     Ok(())
 }
 
-fn connect(integrated: bool) -> io::Result<File> {
+fn connect(integrated: bool, allow_start: bool) -> io::Result<File> {
     let (name, sid) = cli_protocol::endpoint()?;
     match open_pipe(&name) {
         Ok(pipe) => return Ok(pipe),
@@ -141,7 +141,7 @@ fn connect(integrated: bool) -> io::Result<File> {
     loop {
         match open_pipe(&name) {
             Ok(pipe) => return Ok(pipe),
-            Err(err) if err.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) && !started => {
+            Err(err) if err.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) && !started && allow_start => {
                 start_controller(integrated)?;
                 started = true;
             }
@@ -159,8 +159,8 @@ fn connect(integrated: bool) -> io::Result<File> {
     }
 }
 
-fn call(request: &Request, integrated: bool) -> io::Result<Response> {
-    let mut pipe = connect(integrated)?;
+fn call(request: &Request, integrated: bool, allow_start: bool) -> io::Result<Response> {
+    let mut pipe = connect(integrated, allow_start)?;
     let mut bytes = serde_json::to_vec(request).map_err(io::Error::other)?;
     if bytes.len() >= MAX_LINE {
         return Err(io::Error::new(
@@ -201,6 +201,11 @@ fn call(request: &Request, integrated: bool) -> io::Result<Response> {
     serde_json::from_slice(&response).map_err(io::Error::other)
 }
 
+#[allow(dead_code)]
+pub fn show_existing() {
+    let _ = call(&Request::Tray { command: "show".into(), serial: None }, true, false);
+}
+
 pub fn run(integrated: bool) -> ExitCode {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let json = args.iter().any(|arg| arg == "--json");
@@ -212,7 +217,7 @@ pub fn run(integrated: bool) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let (response, status) = match parse(&args) {
-        Some(request) => match call(&request, integrated) {
+        Some(request) => match call(&request, integrated, true) {
             Ok(response) => {
                 let status = if response.ok { 0 } else { 1 };
                 (response, status)

@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ErrorToast from "./ErrorToast";
@@ -16,7 +17,7 @@ function newer(latest: string, current: string | null) {
   return false;
 }
 
-export default function EngineUpdate({ visible, t }: { visible: boolean; t: Translate }) {
+export default function EngineUpdate({ host, t }: { host: HTMLElement | null; t: Translate }) {
   const [status, setStatus] = useState<Status>();
   const [latest, setLatest] = useState<string>();
   const [checking, setChecking] = useState(false);
@@ -69,17 +70,19 @@ export default function EngineUpdate({ visible, t }: { visible: boolean; t: Tran
     }
   }
 
-  if (!visible) return null;
+  if (!host) return null;
   const available = status && latest && newer(latest, status.current);
   const notice = status && !status.managed ? "engineExternal"
     : status?.pending ? "engineWaiting"
     : busy ? "working"
     : checking ? "engineChecking"
     : latest && status && !available ? "engineUpToDate" : undefined;
-  return <section className="panel controls engine-update">
+  return createPortal(<section className="panel controls settings-card engine-update">
     <h2>{t("engineUpdates")}</h2>
-    <p>{t("engineCurrentVersion")} · {status?.current ?? t("engineVersionUnknown")}</p>
-    <p>{t("engineLatestVersion")} · {latest ?? t("engineVersionUnknown")}</p>
+    <dl className="settings-grid engine-versions">
+      <div><dt>{t("engineCurrentVersion")}</dt><dd>{status?.current ?? t("engineVersionUnknown")}</dd></div>
+      <div><dt>{t("engineLatestVersion")}</dt><dd>{latest ?? t("engineVersionUnknown")}</dd></div>
+    </dl>
     {notice && <p role="status">{t(notice)}</p>}
     <ErrorToast message={failure === undefined ? undefined : errorKey(failure, t)} dismiss={t("dismissNotice")} />
     <div className="tool-row">
@@ -89,5 +92,5 @@ export default function EngineUpdate({ visible, t }: { visible: boolean; t: Tran
       {status?.rollback && <button type="button" disabled={busy || status.pending}
         onClick={() => void change(true)}>{t("engineRollbackAction")}</button>}
     </div>
-  </section>;
+  </section>, host);
 }

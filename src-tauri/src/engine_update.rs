@@ -10,7 +10,7 @@ use std::{
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, ERROR_NO_MORE_FILES, GetLastError, INVALID_HANDLE_VALUE},
     System::{
@@ -43,6 +43,52 @@ pub struct Status {
     pending: bool,
     rollback: bool,
     managed: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct EngineOptions {
+    version: String,
+    options: Vec<EngineOption>,
+}
+
+#[derive(Serialize)]
+struct EngineOption {
+    syntax: String,
+    description: String,
+}
+
+fn parse_engine_options(text: &str) -> Result<EngineOptions> {
+    let version = text.lines().find_map(|line| {
+        line.strip_prefix("scrcpy ")?.split_ascii_whitespace().next()
+    }).ok_or("queryFailed")?.to_owned();
+    let mut options: Vec<EngineOption> = Vec::new();
+    for line in text.lines().skip_while(|line| line.trim() != "Options:").skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+        if line == trimmed { break; }
+        if let Some(syntax) = line.strip_prefix("    ").filter(|syntax| syntax.starts_with('-')) {
+            options.push(EngineOption { syntax: syntax.to_owned(), description: String::new() });
+        } else if let Some(option) = options.last_mut() {
+            if !option.description.is_empty() { option.description.push(' '); }
+            option.description.push_str(trimmed);
+        }
+    }
+    if options.is_empty() { return Err("queryFailed"); }
+    Ok(EngineOptions { version, options })
+}
+
+#[tauri::command]
+pub(crate) async fn engine_options(app: AppHandle) -> Result<EngineOptions> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = engine(&app)?;
+        let mut process = command(path.join("scrcpy.exe"));
+        process.current_dir(path).arg("--help");
+        let result = capture_command(process, None)?;
+        if !result.success { return Err("queryFailed"); }
+        parse_engine_options(&result.text)
+    })
+    .await
+    .map_err(|_| "queryFailed")?
 }
 
 fn base(app: &AppHandle) -> Result<PathBuf> {
@@ -361,7 +407,9 @@ pub fn apply_pending(app: &AppHandle) -> Result<()> {
         }
         slots.pending = None;
         slots.previous = slots.active.replace(pending);
-        save(&base, &slots)
+        save(&base, &slots)?;
+        let _ = app.emit("engine-options-changed", ());
+        Ok(())
     })
     .map(|_| ())
 }
@@ -498,7 +546,9 @@ pub async fn rollback_engine(app: AppHandle) -> Result<()> {
                 return Err("engineUpdateFailed");
             }
             slots.active = slots.previous.take();
-            save(&base, &slots)
+            save(&base, &slots)?;
+            let _ = app.emit("engine-options-changed", ());
+            Ok(())
         })?
         .then_some(())
         .ok_or("engineSessionsActive")
@@ -510,6 +560,17 @@ pub async fn rollback_engine(app: AppHandle) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_help_keeps_aliases_optional_values_and_only_options() {
+        let help = "scrcpy 5.0.1 <https://example.org>\r\nUsage: scrcpy [options]\r\n\r\nOptions:\r\n\r\n    -K\r\n        Use a physical keyboard.\r\n\r\n    --new-display[=size]\r\n        Create a display.\r\n        Size is optional.\r\n\r\nShortcuts:\r\n    --not-an-option\r\n";
+        let parsed = parse_engine_options(help).unwrap();
+        assert_eq!(parsed.version, "5.0.1");
+        assert_eq!(parsed.options.len(), 2);
+        assert_eq!(parsed.options[0].syntax, "-K");
+        assert_eq!(parsed.options[1].syntax, "--new-display[=size]");
+        assert_eq!(parsed.options[1].description, "Create a display. Size is optional.");
+    }
 
     #[test]
     fn slot_pointer_replaces_previous_state() {

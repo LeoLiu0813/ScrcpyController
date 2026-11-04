@@ -1,3 +1,4 @@
+import { AppearanceRuntime } from "./ControlAppearance";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
@@ -10,6 +11,7 @@ const label = getCurrentWindow().label;
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     {label.startsWith("mirror-") ? <MirrorWindow /> : <App />}
+    <AppearanceRuntime />
     <Tooltip />
   </React.StrictMode>,
 );

@@ -33,13 +33,14 @@ struct Session {
     task: Option<String>,
     display: Option<AppDisplay>,
     mirror: Option<crate::mirror::Mirror>,
+    recording: bool,
 }
 
 impl Drop for Sessions {
     fn drop(&mut self) {
         if let Ok(sessions) = self.0.get_mut() {
             for session in sessions.values_mut() {
-                if session.task.as_deref() == Some("backgroundRecord")
+                if matches!(session.task.as_deref(), Some("backgroundRecord" | "audioRecord"))
                     || !matches!(session.child.try_wait(), Ok(None))
                 {
                     continue;
@@ -235,7 +236,7 @@ fn devices_with_sessions(app: &AppHandle, path: &std::path::Path) -> Result<Vec<
 pub(crate) fn shutdown_windows(app: &AppHandle) {
     let state = app.state::<Sessions>();
     let Ok(mut sessions) = state.0.lock() else { return; };
-    let keys = sessions.iter().filter(|(_, session)| session.task.as_deref() != Some("backgroundRecord"))
+    let keys = sessions.iter().filter(|(_, session)| !matches!(session.task.as_deref(), Some("backgroundRecord" | "audioRecord")))
         .map(|(key, _)| key.clone()).collect::<Vec<_>>();
     let mut closing = keys.into_iter().filter_map(|key| sessions.remove(&key)).collect::<Vec<_>>();
     drop(sessions);
@@ -297,11 +298,22 @@ pub async fn open_device(
             let mut command = official(&path, &serial);
             command.args(["--window-title", &title]);
             let mut profile = profile.unwrap_or_default();
-            let embed = profile.camera.is_empty();
+            if profile.has_crop() {
+                let mut size = Command::new(adb_path(&path));
+                size.args(["-s", &serial, "shell", "wm", "size"]).creation_flags(CREATE_NO_WINDOW);
+                let size = capture_query(size)?;
+                let (width, height) = size.text.lines().find_map(|line| {
+                    let (width, height) = line.strip_prefix("Physical size: ")?.trim().split_once('x')?;
+                    Some((width.parse().ok()?, height.parse().ok()?))
+                }).ok_or("invalidCrop")?;
+                profile.validate_crop(width, height)?;
+            }
+            let embed = !profile.is_camera();
             let options = embed.then(|| {
-                let options = crate::mirror::MirrorOptions::prepare(
+                let mut options = crate::mirror::MirrorOptions::prepare(
                     &mut command, profile.fullscreen, profile.top, !profile.read_only, !profile.display.is_empty(), false,
                 );
+                options.startup = profile.startup;
                 profile.fullscreen = false;
                 profile.top = false;
                 options
@@ -310,11 +322,11 @@ pub async fn open_device(
             let port_start = session_ports(&sessions, &mut command)?;
             let mut child = command.spawn().map_err(|_| "launchFailed")?;
             if let Some(options) = &options {
-                options.watch_fps(&mut child);
+                options.watch_stats(&mut child);
             }
             let pid = child.id();
             sessions.insert(key.clone(), Session {
-                child, port_start, stopping: false, task: None, display: None, mirror: None,
+                child, port_start, stopping: false, task: None, display: None, mirror: None, recording: capture.is_some(),
             });
             let Some(options) = options else { return Ok(capture); };
             (pid, title, capture, options)
@@ -376,16 +388,30 @@ fn mirror_session(window: &tauri::WebviewWindow) -> Result<(String, crate::mirro
 }
 
 #[tauri::command]
-pub fn mirror_info(window: tauri::WebviewWindow) -> Result<(String, i32, i32, String, bool, bool)> {
+pub fn mirror_info(window: tauri::WebviewWindow) -> Result<(String, i32, i32, String, bool, bool, bool)> {
     let (serial, mirror) = mirror_session(&window)?;
     let (width, height) = mirror.original_size;
-    Ok((window.title().map_err(|_| "mirrorFrameFailed")?, width, height, serial, mirror.options.virtual_screen, mirror.options.follow))
+    let state = window.state::<Sessions>();
+    let sessions = state.0.lock().map_err(|_| "sessionError")?;
+    let recording = !mirror.options.virtual_screen && sessions.get(&(serial.clone(), None))
+        .is_some_and(|session| session.recording);
+    Ok((window.title().map_err(|_| "mirrorFrameFailed")?, width, height, serial,
+        mirror.options.virtual_screen, mirror.options.follow, recording))
 }
 
 #[tauri::command]
-pub fn mirror_fps(window: tauri::WebviewWindow) -> Result<Option<u32>> {
+pub async fn lock_device(app: AppHandle, serial: String) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        require_online(&app, &serial)?;
+        mirror_phone_command(&app, &serial, &["input", "-d", "0", "keyevent", "KEYCODE_SLEEP"])?;
+        Ok(())
+    }).await.map_err(|_| "mirrorActionFailed")?
+}
+
+#[tauri::command]
+pub fn mirror_stats(window: tauri::WebviewWindow) -> Result<(Option<u32>, Option<[u16; 2]>)> {
     let (_, mirror) = mirror_session(&window)?;
-    Ok(mirror.options.fps())
+    Ok(mirror.options.stats())
 }
 
 #[tauri::command]
@@ -418,6 +444,12 @@ pub async fn mirror_action(window: tauri::WebviewWindow, action: String) -> Resu
     let app = window.app_handle().clone();
     let owner = window.hwnd().map_err(|_| "mirrorFrameFailed")?.0 as usize;
     let virtual_screen = mirror.options.virtual_screen;
+    if action == "sendFiles" && !virtual_screen {
+        use tauri::Emitter;
+        crate::tray::show(&app)?;
+        app.emit_to("main", "open-file-tools", serial).map_err(|_| "mirrorActionFailed")?;
+        return Ok(None);
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let key = match action.as_str() {
             "back" => Some("KEYCODE_BACK"),
@@ -513,6 +545,22 @@ fn mirror_capture(app: &AppHandle, serial: &str, action: &str, owner: HWND) -> R
     }
     std::fs::write(&file, &bytes).map_err(|_| "captureUnavailable")?;
     Ok(Some(file))
+}
+
+#[tauri::command]
+pub async fn capture_crop_preview(app: AppHandle, serial: String) -> Result<tauri::ipc::Response> {
+    tauri::async_runtime::spawn_blocking(move || {
+        require_online(&app, &serial)?;
+        phone_screenshot(&app, &serial).map(tauri::ipc::Response::new)
+    }).await.map_err(|_| "captureUnavailable")?
+}
+
+#[tauri::command]
+pub fn reveal_capture(path: PathBuf) -> Result<()> {
+    if !path.is_absolute() || !path.is_file() { return Err("captureUnavailable"); }
+    Command::new("explorer.exe").arg("/select,").arg(path)
+        .spawn().map_err(|_| "captureUnavailable")?;
+    Ok(())
 }
 
 fn phone_screenshot(app: &AppHandle, serial: &str) -> Result<Vec<u8>> {
@@ -640,7 +688,7 @@ pub fn stop_device(app: AppHandle, serial: String) -> Result<()> {
     let mut sessions = state.0.lock().map_err(|_| "sessionError")?;
     reap(&mut sessions);
     if let Some(session) = sessions.get_mut(&(serial.clone(), None)) {
-        if session.task.as_deref() == Some("backgroundRecord") {
+        if matches!(session.task.as_deref(), Some("backgroundRecord" | "audioRecord")) {
             return Err("taskBusy");
         }
         if let Some(window) = session.mirror.as_ref().map(crate::mirror::Mirror::window).or_else(|| session_window(session.child.id())) {
@@ -697,7 +745,15 @@ pub async fn run_tool(
     serial: String,
     task: String,
     seconds: u32,
+    folder: Option<String>,
+    format: Option<String>,
+    audio_source: Option<String>,
+    profile: Option<Profile>,
 ) -> Result<Option<PathBuf>> {
+    if task == "cameraMirror" {
+        let alias = crate::tray::configured_name(&app, &serial);
+        return open_device(app, serial, alias, Some(profile.unwrap_or_default().for_camera())).await;
+    }
     tauri::async_runtime::spawn_blocking(move || {
         if !(3..=300).contains(&seconds) {
             return Err("invalidDuration");
@@ -725,10 +781,22 @@ pub async fn run_tool(
         let mut capture = None;
         match task.as_str() {
             "backgroundRecord" => {
-                let file = profile::recording(&app)?;
+                let format = format.as_deref().unwrap_or("mkv");
+                if !matches!(format, "mkv" | "mp4") { return Err("invalidProfile"); }
+                let file = profile::recording_path(&app, folder.as_deref().unwrap_or(""), "screen", format, false)?;
                 command
                     .args(["--no-window", "--no-playback", "--no-control", "--record"])
                     .arg(&file);
+                capture = Some(file);
+            }
+            "audioRecord" => {
+                let format = format.as_deref().unwrap_or("opus");
+                let codec = match format { "opus" => "opus", "flac" => "flac", "wav" => "raw", _ => return Err("invalidProfile") };
+                let source = audio_source.as_deref().unwrap_or("output");
+                if !matches!(source, "output" | "mic") { return Err("invalidProfile"); }
+                let file = profile::recording_path(&app, folder.as_deref().unwrap_or(""), "audio", format, false)?;
+                command.args(["--no-video", "--no-window", "--no-control", "--no-audio-playback",
+                    "--require-audio", "--audio-codec", codec, "--audio-source", source, "--record"]).arg(&file);
                 capture = Some(file);
             }
             "audioOnly" => {
@@ -777,12 +845,65 @@ pub async fn run_tool(
                 task: Some(task),
                 display: None,
                 mirror: None,
+                recording: capture.is_some(),
             },
         );
         Ok(capture)
     })
     .await
     .map_err(|_| "sessionError")?
+}
+
+#[tauri::command]
+pub async fn choose_local_paths(window: tauri::WebviewWindow, folder: bool) -> Result<Vec<PathBuf>> {
+    use tauri_plugin_dialog::DialogExt;
+    tauri::async_runtime::spawn_blocking(move || {
+        let dialog = window.dialog().file().set_parent(&window);
+        let paths = if folder {
+            dialog.blocking_pick_folder().into_iter().collect()
+        } else {
+            dialog.blocking_pick_files().unwrap_or_default()
+        };
+        paths.into_iter().map(|path| path.into_path().map_err(|_| "invalidLocalPath")).collect()
+    }).await.map_err(|_| "invalidLocalPath")?
+}
+
+#[derive(Serialize)]
+pub struct FileResult {
+    path: PathBuf,
+    success: bool,
+    detail: String,
+}
+
+#[tauri::command]
+pub async fn transfer_files(
+    app: AppHandle, serial: String, files: Vec<PathBuf>, target: String, install: bool,
+) -> Result<Vec<FileResult>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        require_online(&app, &serial)?;
+        if files.is_empty() || files.len() > 32 || !install && !profile::android_folder(&target) {
+            return Err("invalidPushTarget");
+        }
+        let adb = adb_path(&engine(&app)?);
+        Ok(files.into_iter().map(|path| {
+            let is_apk = path.extension().and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("apk"));
+            let mut command = Command::new(&adb);
+            command.args(["-s", &serial]).creation_flags(CREATE_NO_WINDOW).stdin(Stdio::null());
+            let output = if !path.is_absolute() || !path.is_file() || (install && !is_apk) {
+                Err("invalidLocalPath")
+            } else {
+                if install { command.arg("install").arg(&path); }
+                else { command.arg("push").arg(&path).arg(&target); }
+                capture_with_timeout(command, None, Duration::from_secs(300))
+            };
+            let (success, detail) = match output {
+                Ok(output) => (output.success, output.text),
+                Err(error) => (false, error.into()),
+            };
+            FileResult { path, success, detail }
+        }).collect())
+    }).await.map_err(|_| "queryFailed")?
 }
 
 #[derive(Serialize)]
@@ -813,7 +934,7 @@ pub async fn query_device(app: AppHandle, serial: String, query: String) -> Resu
                     "-s",
                     &serial,
                     "shell",
-                    "getprop ro.product.manufacturer; wm size; printf '\\ncontroller-serial:'; getprop ro.serialno",
+                    "getprop ro.product.manufacturer; wm size; printf '\\ncontroller-serial:'; getprop ro.serialno; printf 'controller-sdk:'; getprop ro.build.version.sdk",
                 ])
                 .creation_flags(CREATE_NO_WINDOW)
                 .stdin(Stdio::null());
@@ -954,7 +1075,7 @@ pub async fn open_app_window(
             let mut child = command
                 .arg("--start-app").arg(&package).arg("--window-title").arg(&title)
                 .spawn().map_err(|_| "appWindowFailed")?;
-            options.watch_fps(&mut child);
+            options.watch_stats(&mut child);
             let pid = child.id();
             sessions.insert(
                 key.clone(),
@@ -964,7 +1085,8 @@ pub async fn open_app_window(
                     stopping: false,
                     task: None,
                     display: Some(display),
-                    mirror: None,
+                        mirror: None,
+                    recording: false,
                 },
             );
             (pid, title, options, douyin_server, wechat_server)
@@ -993,7 +1115,11 @@ fn capture_query(command: Command) -> Result<QueryOutput> {
     capture_command(command, None)
 }
 
-pub(crate) fn capture_command(mut command: Command, input: Option<&str>) -> Result<QueryOutput> {
+pub(crate) fn capture_command(command: Command, input: Option<&str>) -> Result<QueryOutput> {
+    capture_with_timeout(command, input, Duration::from_secs(12))
+}
+
+fn capture_with_timeout(mut command: Command, input: Option<&str>, timeout: Duration) -> Result<QueryOutput> {
     use std::io::{Read, Write};
     if input.is_some() {
         command.stdin(Stdio::piped());
@@ -1025,7 +1151,7 @@ pub(crate) fn capture_command(mut command: Command, input: Option<&str>) -> Resu
     };
     let out = read(Box::new(stdout));
     let err = read(Box::new(stderr));
-    let deadline = Instant::now() + Duration::from_secs(12);
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,

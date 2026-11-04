@@ -1,45 +1,42 @@
+import { AudioLines, ClipboardList, Film, MonitorCog, Terminal, UserRound } from "lucide-react";
+import ControlAppearance from "./ControlAppearance";
+import { Monitor, Settings, RefreshCw, Smartphone, Trash2, ListChecks, WifiOff, Wifi,
+  Play, Scan, Square, LockKeyhole, SlidersHorizontal, Pencil, RotateCcw, Minus, Maximize2, X,
+  AppWindow, GripVertical, Languages, Palette, PackageCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getInitialLocale, locales, type Locale, type Message } from "./locales";
-import { deviceStorageKey, bindAlias } from "./deviceAliases";
-import { AppWindowPanel, bindDeviceApps, defaultProfile, loadMap, ProfileEditor, ToolPanel, type Device, type Profile } from "./Workflows";
+import { deviceStorageKey, bindAlias, legacyDeviceKeys } from "./deviceAliases";
+import { AppWindowPanel, bindDeviceApps, defaultProfile, loadMap, ProfileEditor, ToolPanel, toolSections, type Device, type Profile, type ToolSection } from "./Workflows";
 import ConnectionDialog from "./ConnectionDialog";
 import { MirrorAppearance } from "./MirrorWindow";
 import ErrorToast from "./ErrorToast";
 import EngineUpdate from "./EngineUpdate";
+import LaunchArgumentsEditor from "./LaunchArgumentsEditor";
 import "./App.css";
 
 const icons = {
-  expandRail: "M3 4h18v16H3zM8 4v16m4-11 3 3-3 3",
-  collapseRail: "M3 4h18v16H3zM8 4v16m8-11-3 3 3 3",
-  devices: "M4 5h16v11H4zM9 20h6m-3-4v4",
-  settings: "M12 3v3m0 12v3M3 12h3m12 0h3M6 6l2 2m8 8 2 2m0-12-2 2m-8 8-2 2M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10",
-  refresh: "M19 8a8 8 0 1 0 1 7m-1-11v5h-5",
-  addDevice: "M5 3h9v18H5zM8 18h3m7-10v8m-4-4h8",
-  trash: "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7m4-7v7",
-  selectDevices: "M4 5h16v14H4zM8 12l3 3 5-6",
-  disconnect: "M3 8a14 14 0 0 1 18 0M6 12a9 9 0 0 1 7-2m-4 6a4 4 0 0 1 3-1m0 5h.01m4-6 5 5m0-5-5 5",
-  wireless: "M3 9a14 14 0 0 1 18 0M6 13a9 9 0 0 1 12 0M9 17a4 4 0 0 1 6 0m-3 3h.01",
-  open: "M8 5l12 7-12 7z",
-  focus: "M4 9V4h5m6 0h5v5m0 6v5h-5m-6 0H4v-5M9 12h6m-3-3v6",
-  stop: "M6 6h12v12H6z",
-  profiles: "M4 7h16M4 17h16M8 4v6m8 4v6",
-  tools: "M14 6a4 4 0 0 0-5 5L4 16a2 2 0 0 0 3 3l5-5a4 4 0 0 0 5-5l-3 3-2-2z",
-  rename: "m4 16 12-12 4 4L8 20H4zm10-10 4 4",
-  reset: "M4 10a8 8 0 1 1 1 7M4 5v5h5",
-  minimize: "M5 12h14",
-  maximize: "M5 5h14v14H5z",
-  close: "m6 6 12 12M18 6 6 18",
-  appWindows: "M4 5h16v14H4zM4 9h16M9 13h6m-3-3v6",
+  devices: Monitor, settings: Settings, refresh: RefreshCw, addDevice: Smartphone,
+  trash: Trash2, selectDevices: ListChecks, disconnect: WifiOff, wireless: Wifi,
+  open: Play, focus: Scan, stop: Square, lock: LockKeyhole, profiles: SlidersHorizontal,
+  rename: Pencil, reset: RotateCcw, minimize: Minus, maximize: Maximize2,
+  close: X, appWindows: AppWindow,
 };
+
+const deviceSettingsSections = [
+  ["editDevice", UserRound], ["quality", Monitor], ["audioOutput", AudioLines],
+  ["recordingSettings", Film], ["windowBehavior", MonitorCog], ["advanced", SlidersHorizontal],
+  ["clipboardFiles", ClipboardList], ["launchPreview", Terminal],
+] as const;
+type DeviceSettingsSection = typeof deviceSettingsSections[number][0];
 
 const brands = ["generic", "oneplus", "xiaomi", "google", "samsung"] as const;
 type Brand = typeof brands[number];
 type Mark = { brand: Brand | "auto"; badge: string };
 const defaultMark: Mark = { brand: "auto", badge: "" };
-type DeviceFacts = { brand: Brand; manufacturer: string; size?: [number, number] };
+type DeviceFacts = { brand: Brand; manufacturer: string; size?: [number, number]; sdk?: number };
 type KnownDevice = Pick<Device, "serial" | "model" | "connection">;
 const resizeEdges = ["North", "South", "East", "West", "NorthEast", "NorthWest", "SouthEast", "SouthWest"] as const;
 
@@ -60,7 +57,7 @@ function opacity(key: string, fallback: number) {
 function DeviceMark({ mark, detected }: { mark: Mark; detected?: Brand }) {
   const brand = mark.brand === "auto" ? detected ?? "generic" : mark.brand;
   return <span className="device-mark" aria-hidden="true">
-    {brand === "generic" ? <svg viewBox="0 0 24 24"><path d="M7 3h10v18H7zM11 18h2" /></svg>
+    {brand === "generic" ? <Smartphone aria-hidden="true" />
       : <span className={`brand-symbol brand-${brand}`} />}
     {mark.badge && <span className="device-badge">{mark.badge}</span>}
   </span>;
@@ -74,10 +71,11 @@ function IconButton({ icon, label, text, active, disabled, onClick }: {
   disabled?: boolean;
   onClick: () => void;
 }) {
+  const Glyph = icons[icon];
   return (
     <button type="button" className="icon-button" aria-label={label}
       aria-pressed={active} data-tip={label} disabled={disabled} onClick={onClick}>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d={icons[icon]} /></svg>
+      <Glyph aria-hidden="true" />
       {text && <span>{text}</span>}
     </button>
   );
@@ -91,10 +89,16 @@ function errorKey(error: unknown): Message {
 
 export default function App() {
   const [locale, setLocale] = useState(getInitialLocale);
+  const [closeBehavior, setCloseBehavior] = useState<"tray" | "exit">(() =>
+    localStorage.getItem("main-close-behavior") === "exit" ? "exit" : "tray");
+  const [toolSection, setToolSection] = useState<ToolSection>("query");
+  const [settingsSection, setSettingsSection] = useState<"general" | "appearance" | "engine">("general");
+  const [enginePanel, setEnginePanel] = useState<HTMLDivElement | null>(null);
   const [page, setPage] = useState<"devices" | "tools" | "appWindows" | "settings">("devices");
   const [profileSerial, setProfileSerial] = useState<string>();
+  const [deviceSettingsSection, setDeviceSettingsSection] = useState<DeviceSettingsSection>("editDevice");
+  const deviceSettingsBody = useRef<HTMLDivElement>(null);
   const [connectionOpen, setConnectionOpen] = useState(false);
-  const [expanded, setExpanded] = useState(() => localStorage.getItem("nav-expanded") === "true");
   const [devices, setDevices] = useState<Device[]>([]);
   const [known, setKnown] = useState(() => loadMap<KnownDevice>("known-devices"));
   const [order, setOrder] = useState(() => readSerials("device-order"));
@@ -126,7 +130,7 @@ export default function App() {
   const [dropTarget, setDropTarget] = useState<string>();
   const [windowOpacity, setWindowOpacity] = useState(() => opacity("window-opacity", 88));
   const [panelOpacity, setPanelOpacity] = useState(() => opacity("panel-opacity", 86));
-  const [capture, setCapture] = useState<string>();
+  const [capture, setCapture] = useState<{ name: string; path: string; serial: string }>();
   const [preview, setPreview] = useState<{ serial: string; profile: Profile; title: string; args: string[] }>();
   const refreshing = useRef<Promise<void> | null>(null);
   const messages = locales[locale];
@@ -143,9 +147,22 @@ export default function App() {
   const nativeWindow = getCurrentWindow();
   const windowStyle = { "--window-opacity": `${windowOpacity}%`, "--panel-opacity": `${panelOpacity}%` } as CSSProperties;
   const configured = profileSerial ? merged.get(profileSerial) : undefined;
-  const currentProfile = configured ? profiles[configured.serial] ?? defaultProfile : defaultProfile;
+  const currentProfile = configured ? profileFor(configured.serial) : defaultProfile;
   const appDeviceKey = target && deviceStorageKey(target.serial, identities);
   const currentTitle = target ? deviceName(target) : "";
+
+  function profileFor(serial: string): Profile {
+    const hardware = identities[serial];
+    const key = deviceStorageKey(serial, identities);
+    const legacy = hardware && legacyDeviceKeys(serial, hardware, identities, Object.keys(profiles))
+      .find((candidate) => profiles[candidate]);
+    const saved = profiles[key] ?? (legacy ? profiles[legacy] : undefined);
+    return saved ? { ...defaultProfile, ...saved } : defaultProfile;
+  }
+
+  function normalProfile(serial: string): Profile {
+    return { ...profileFor(serial), camera: "", cameraId: "" };
+  }
 
   function deviceAlias(serial: string) {
     return aliases[deviceStorageKey(serial, identities)];
@@ -209,6 +226,7 @@ export default function App() {
     setPreview(undefined);
     setActionError(undefined);
     setProfileSerial(device.serial);
+    setDeviceSettingsSection("editDevice");
     const value = deviceAlias(device.serial) ?? "";
     setEditing({ serial: device.serial, value, originalName: value, ...(marks[device.serial] ?? defaultMark) });
   }
@@ -251,25 +269,32 @@ export default function App() {
     setOrder(ids);
   }
 
-  async function previewProfile() {
+  async function previewProfile(extraArgs: string[]) {
     if (!configured) return;
     const title = deviceName(configured);
+    const profile = { ...currentProfile, extraArgs };
     setActionError(undefined);
     setPreview(undefined);
     try {
       const args = await invoke<string[]>("preview_profile", {
-        serial: configured.serial, title, profile: currentProfile,
+        serial: configured.serial, title, profile: { ...normalProfile(configured.serial), extraArgs },
       });
-      setPreview({ serial: configured.serial, profile: currentProfile, title, args });
+      setPreview({ serial: configured.serial, profile, title, args });
     } catch (error) {
       setActionError(errorKey(error));
     }
   }
 
   function saveProfile(serial: string, profile: Profile) {
-    const next = { ...profiles, [serial]: profile };
+    const next = { ...profiles, [deviceStorageKey(serial, identities)]: profile };
     localStorage.setItem("device-profiles", JSON.stringify(next));
     setProfiles(next);
+  }
+
+  function saveDeviceMark(serial: string, mark: Mark) {
+    const next = { ...marks, [serial]: mark };
+    localStorage.setItem("device-marks-v2", JSON.stringify(next));
+    setMarks(next);
   }
 
   function saveAlias() {
@@ -288,9 +313,7 @@ export default function App() {
       localStorage.setItem("device-aliases", JSON.stringify(next));
       setAliases(next);
     }
-    const nextMarks = { ...marks, [editing.serial]: { brand: editing.brand, badge: editing.badge } };
-    localStorage.setItem("device-marks-v2", JSON.stringify(nextMarks));
-    setMarks(nextMarks);
+    saveDeviceMark(editing.serial, { brand: editing.brand, badge: editing.badge });
     setEditing({ ...editing, value, originalName: value });
     setActionError(undefined);
   }
@@ -328,16 +351,26 @@ export default function App() {
 
   const traySettings = JSON.stringify({
     english: locale === "en-US",
+    exitOnClose: closeBehavior === "exit",
     devices: ordered.map((device) => ({
       serial: device.serial,
       name: deviceName(device),
-      profile: profiles[device.serial] ?? defaultProfile,
+      profile: normalProfile(device.serial),
     })),
     removed,
   });
   useEffect(() => {
     void invoke("tray_sync", JSON.parse(traySettings)).catch(() => {});
   }, [traySettings]);
+  useEffect(() => {
+    const listener = listen<string>("open-file-tools", ({ payload }) => {
+      selectDevice(payload);
+      setToolSection("files");
+      setPage("tools");
+    });
+    return () => { void listener.then((unlisten) => unlisten()).catch(() => {}); };
+  }, []);
+
   useEffect(() => {
     const listener = listen<string>("tray-device-error", ({ payload }) => setActionError(errorKey(payload)));
     return () => { void listener.then((unlisten) => unlisten()).catch(() => {}); };
@@ -350,13 +383,10 @@ export default function App() {
     void getCurrentWindow().setTitle(messages.title).catch(() => {});
   }, [locale, messages.title]);
 
-  useEffect(() => {
-    localStorage.setItem("nav-expanded", String(expanded));
-  }, [expanded]);
-
   useEffect(() => localStorage.setItem("known-devices", JSON.stringify(known)), [known]);
   useEffect(() => localStorage.setItem("device-order", JSON.stringify(order)), [order]);
   useEffect(() => localStorage.setItem("selected-device", selected), [selected]);
+  useEffect(() => localStorage.setItem("main-close-behavior", closeBehavior), [closeBehavior]);
   useEffect(() => localStorage.setItem("window-opacity", String(windowOpacity)), [windowOpacity]);
   useEffect(() => localStorage.setItem("panel-opacity", String(panelOpacity)), [panelOpacity]);
 
@@ -397,11 +427,29 @@ export default function App() {
             (/redmi|poco/.test(manufacturer) ? "xiaomi" : "generic");
           const match = text.match(/Physical size:\s*(\d+)x(\d+)/);
           setFacts((previous) => ({ ...previous, [serial]: {
-            brand, manufacturer, size: match ? [Number(match[1]), Number(match[2])] : undefined,
+            brand, manufacturer, sdk: Number(text.match(/^controller-sdk:(\d+)\s*$/m)?.[1]) || undefined, size: match ? [Number(match[1]), Number(match[2])] : undefined,
           } }));
         }).catch(() => {}).finally(() => { factRequests.current.delete(serial); });
     }
   }, [devices, facts]);
+
+  async function lockDevice(device: Device) {
+    const serial = device.serial;
+    if (pending.has(serial)) return;
+    setActionError(undefined);
+    setPending((previous) => new Set(previous).add(serial));
+    try {
+      await invoke("lock_device", { serial });
+    } catch (error) {
+      setActionError(errorKey(error));
+    } finally {
+      setPending((previous) => {
+        const next = new Set(previous);
+        next.delete(serial);
+        return next;
+      });
+    }
+  }
 
   async function operate(device: Device, operation: "open_device" | "stop_device") {
     if (pending.has(device.serial)) return;
@@ -412,10 +460,10 @@ export default function App() {
         const path = await invoke<string | null>(operation, {
           serial: device.serial,
           alias: deviceAlias(device.serial) ?? null,
-          profile: profiles[device.serial] ?? defaultProfile,
+          profile: normalProfile(device.serial),
         });
         if (path && (page === "devices" || selection.current === device.serial)) {
-          setCapture(`${deviceName(device)} · ${path}`);
+          setCapture({ name: deviceName(device), path, serial: device.serial });
         }
       } else {
         await invoke(operation, { serial: device.serial });
@@ -481,30 +529,37 @@ export default function App() {
         <div className="title-actions">
           <IconButton icon="minimize" label={t("minimizeWindow")} onClick={() => void nativeWindow.minimize()} />
           <IconButton icon="maximize" label={t("maximizeWindow")} onClick={() => void nativeWindow.toggleMaximize()} />
-          <IconButton icon="close" label={t("closeConsole")} onClick={() => void nativeWindow.close()} />
+          <IconButton icon="close" label={t(closeBehavior === "exit" ? "exitOnClose" : "closeConsole")} onClick={() => void nativeWindow.close()} />
         </div>
       </div>
       {resizeEdges.map((edge) => <div key={edge} className={`resize-edge resize-${edge}`} aria-hidden="true"
         onMouseDown={(event) => {
           if (event.button === 0) void nativeWindow.startResizeDragging(edge).catch(() => {});
         }} />)}
-      <div className={expanded ? "app expanded" : "app"}>
+      <div className="app">
       <nav className="rail" aria-label={messages.title}>
-        <IconButton icon={expanded ? "collapseRail" : "expandRail"} label={messages[expanded ? "collapse" : "expand"]}
-          active={expanded} onClick={() => setExpanded(!expanded)} />
-        <IconButton icon="devices" label={messages.devices} text={expanded ? messages.devices : undefined}
-          active={page === "devices"} onClick={() => setPage("devices")} />
-        {(["appWindows", "tools"] as const).map((entry) => <IconButton key={entry} icon={entry}
-          label={t(entry)} text={expanded ? t(entry) : undefined} active={page === entry}
-          onClick={() => { setPhoneMenu(false); setActionError(undefined); setPage(entry); }} />)}
-        <div className="rail-spacer" />
+        <div className="rail-links">
+          <IconButton icon="devices" label={messages.devices} active={page === "devices"}
+            onClick={() => { setPhoneMenu(false); setPage("devices"); }} />
+          <IconButton icon="appWindows" label={t("appWindows")} active={page === "appWindows"}
+            onClick={() => { setPhoneMenu(false); setActionError(undefined); setPage("appWindows"); }} />
+          <div className="rail-tools" role="group" aria-label={t("tools")}>
+            {toolSections.map(({ id, label, Icon }) => <button key={id} type="button" className="icon-button"
+              aria-label={t(label)} data-tip={t(label)} aria-pressed={page === "tools" && toolSection === id}
+              onClick={() => {
+                setPhoneMenu(false);
+                setActionError(undefined);
+                setToolSection(id);
+                setPage("tools");
+              }}><Icon aria-hidden="true" /></button>)}
+          </div>
+        </div>
         <div className="phone-picker">
           <button type="button" className="icon-button phone-choice" aria-label={t("chooseActivePhone")}
             aria-expanded={phoneMenu} data-tip={target ? `${t("currentPhone")} · ${currentTitle}` : t("chooseActivePhone")}
             onClick={() => setPhoneMenu(!phoneMenu)}>
             <DeviceMark mark={target ? visibleMark(target.serial) : defaultMark}
               detected={target ? facts[target.serial]?.brand : undefined} />
-            {expanded && <span className="phone-name">{currentTitle || t("chooseActivePhone")}</span>}
           </button>
           {phoneMenu && <div className="phone-popover panel" role="group" aria-label={t("chooseActivePhone")}>
           {!ordered.length && <p>{t("noTarget")}</p>}
@@ -520,7 +575,7 @@ export default function App() {
           })}
           </div>}
         </div>
-        <IconButton icon="settings" label={messages.settings} text={expanded ? messages.settings : undefined}
+        <IconButton icon="settings" label={messages.settings}
           active={page === "settings"} onClick={() => setPage("settings")} />
       </nav>
       <main className={page === "devices" ? "device-page" : undefined} onPointerDown={() => setPhoneMenu(false)}>
@@ -531,30 +586,69 @@ export default function App() {
         </div>}
         {!connectionOpen && page !== "settings" && page !== "appWindows" &&
           <ErrorToast message={actionError ? t(actionError) : listError ? t(listError) : undefined} dismiss={t("dismissNotice")} />}
-        {page !== "settings" && page !== "appWindows" && capture && <p className="capture" role="status">{t("capturePath")} · {capture}</p>}
+        {page === "devices" && capture && <div className="panel hidden-device-notice">
+          <span className="capture" role="status">{t("capturePath")} · {capture.name} · {capture.path}</span>
+          <button type="button" disabled={["starting", "running", "stopping"].includes(merged.get(capture.serial)?.session ?? "")}
+            onClick={() => void invoke("reveal_capture", { path: capture.path }).catch((error) => setActionError(errorKey(error)))}>
+            {t("revealRecording")}
+          </button>
+        </div>}
         {page === "settings" ? (
-          <><label className="panel setting">
-            {messages.language}
-            <select value={locale} onChange={(event) => setLocale(event.target.value as Locale)}>
-              <option value="zh-CN" lang="zh-CN">简体中文</option>
-              <option value="en-US" lang="en-US">English</option>
-            </select>
-          </label>
-          <section className="panel controls appearance">
-            <h2>{t("appearance")}</h2>
-            <label className="field"><span>{t("windowOpacity")} · {windowOpacity}%</span>
-              <input aria-label={t("windowOpacity")} type="range" min={20} max={100} value={windowOpacity}
-                onChange={(event) => setWindowOpacity(Number(event.target.value))} /></label>
-            <label className="field"><span>{t("panelOpacity")} · {panelOpacity}%</span>
-              <input aria-label={t("panelOpacity")} type="range" min={20} max={100} value={panelOpacity}
-                onChange={(event) => setPanelOpacity(Number(event.target.value))} /></label>
-            <IconButton icon="reset" label={t("resetAppearance")} onClick={() => { setWindowOpacity(88); setPanelOpacity(86); }} />
-          </section></>
+          <div className="settings-layout">
+            <nav className="section-sidebar" aria-label={t("settings")}>
+              {([
+                ["general", "generalSettings", Languages],
+                ["appearance", "appearance", Palette],
+                ["engine", "engineUpdates", PackageCheck],
+              ] as const).map(([section, label, Glyph]) => <button type="button" key={section}
+                aria-pressed={settingsSection === section} onClick={() => setSettingsSection(section)}>
+                <Glyph size={17} aria-hidden="true" /><span>{t(label)}</span>
+              </button>)}
+            </nav>
+            <div className="section-content settings-stack">
+              {settingsSection === "general" && <section className="panel controls settings-card">
+                <h2>{t("generalSettings")}</h2>
+                <div className="field-grid">
+                  <label className="field"><span>{messages.language}</span>
+                    <select value={locale} onChange={(event) => setLocale(event.target.value as Locale)}>
+                      <option value="zh-CN" lang="zh-CN">简体中文</option>
+                      <option value="en-US" lang="en-US">English</option>
+                    </select>
+                  </label>
+                  <label className="field"><span>{t("closeBehavior")}</span>
+                    <select value={closeBehavior} onChange={(event) => setCloseBehavior(event.target.value === "exit" ? "exit" : "tray")}>
+                      <option value="tray">{t("closeConsole")}</option>
+                      <option value="exit">{t("exitOnClose")}</option>
+                    </select>
+                  </label>
+                </div>
+              </section>}
+              {settingsSection === "appearance" && <>
+                <section className="panel controls settings-card">
+                  <div className="settings-card-heading"><h2>{t("mainWindowAppearance")}</h2>
+                    <IconButton icon="reset" label={t("resetAppearance")} onClick={() => { setWindowOpacity(88); setPanelOpacity(86); }} />
+                  </div>
+                  <div className="field-grid task-options">
+                    <label className="field"><span>{t("windowOpacity")} · {windowOpacity}%</span>
+                      <input type="range" min={20} max={100} value={windowOpacity}
+                        onChange={(event) => setWindowOpacity(Number(event.target.value))} /></label>
+                    <label className="field"><span>{t("panelOpacity")} · {panelOpacity}%</span>
+                      <input type="range" min={20} max={100} value={panelOpacity}
+                        onChange={(event) => setPanelOpacity(Number(event.target.value))} /></label>
+                  </div>
+                </section>
+                <ControlAppearance t={t} locale={locale} />
+                <MirrorAppearance t={t} />
+              </>}
+              {settingsSection === "engine" && <div ref={setEnginePanel} />}
+            </div>
+          </div>
         ) : page === "appWindows" ? (
           <AppWindowPanel key={`${selected}:${appDeviceKey}:${!listError && target?.status === "online"}`} deviceKey={appDeviceKey} serial={!listError && target?.status === "online" ? target.serial : undefined}
             title={currentTitle} screen={target ? facts[target.serial]?.size : undefined} t={t} />
         ) : page === "tools" ? (
-          <><MirrorAppearance t={t} /><ToolPanel key={selected} device={listError ? undefined : target} t={t} refresh={refresh} /></>
+          <ToolPanel key={selected} section={toolSection}
+            device={listError ? undefined : target} profile={target ? profileFor(target.serial) : defaultProfile} t={t} refresh={refresh} />
         ) : (
           <>
             {ordered.length ? (
@@ -595,7 +689,7 @@ export default function App() {
                           if (destination) moveDevice(device.serial, ordered.findIndex((entry) => entry.serial === destination));
                           setDragging(undefined);
                           setDropTarget(undefined);
-                        }} onLostPointerCapture={() => { setDragging(undefined); setDropTarget(undefined); }}>⠿</span>}
+                        }} onLostPointerCapture={() => { setDragging(undefined); setDropTarget(undefined); }}><GripVertical aria-hidden="true" size={16} /></span>}
                       <DeviceMark mark={visibleMark(device.serial)} detected={facts[device.serial]?.brand} />
                       <div className="device-details">
                         <strong>{deviceName(device)}</strong>
@@ -612,10 +706,12 @@ export default function App() {
                           icon={devices.some((entry) => entry.serial === device.serial) ? "disconnect" : "refresh"}
                           label={t(devices.some((entry) => entry.serial === device.serial) ? "disconnectAction" : "reconnectAction")}
                           disabled={pending.has(device.serial) || !!listError} onClick={() => void changeConnection(device)} />}
+                        <IconButton icon="lock" label={t("lockDevice")} disabled={busy || device.status !== "online" || !!listError}
+                          onClick={() => void lockDevice(device)} />
                         <IconButton icon="profiles" label={t("deviceSettings")} onClick={() => openDeviceSettings(device)} />
                         {(!device.task || !running) && <IconButton icon={running ? "focus" : "open"} label={messages[running ? "focus" : "open"]}
                           disabled={!canOpen} onClick={() => void operate(device, "open_device")} />}
-                        {(running || device.session === "stopping") && device.task !== "backgroundRecord" && <IconButton icon="stop" label={messages.stop}
+                        {(running || device.session === "stopping") && !["backgroundRecord", "audioRecord"].includes(device.task ?? "") && <IconButton icon="stop" label={messages.stop}
                           disabled={!running || busy} onClick={() => void operate(device, "stop_device")} />}
                         <IconButton icon="trash" label={t(canDelete(device) ? "deleteDevice" : "closeBeforeDelete")}
                           disabled={!canDelete(device)} onClick={() => setDeleteRequest([device.serial])} />
@@ -627,7 +723,7 @@ export default function App() {
             ) : !listError && <p className="panel empty" role="status">{messages[loading ? "loading" : "empty"]}</p>}
           </>
         )}
-        <EngineUpdate visible={page === "settings"} t={t} />
+        <EngineUpdate host={enginePanel} t={t} />
         {page === "devices" && configured && editing && <section className="panel shortcut-editor device-settings" role="dialog" aria-label={t("deviceSettings")}>
           <header className="device-settings-header"><h2>{t("deviceSettings")} · {deviceName(configured)}</h2>
             <div className="actions">
@@ -636,30 +732,58 @@ export default function App() {
               <IconButton icon="close" label={t("cancel")} onClick={() => setProfileSerial(undefined)} />
             </div>
           </header>
-          <div className="device-settings-body">
-            <section className="panel controls">
-              <h2>{t("editDevice")}</h2>
-              <form onSubmit={(event) => { event.preventDefault(); saveAlias(); }}>
-                <div className="field-grid">
-                  <label className="field" data-tip={t("aliasHint")}><span>{t("rename")}</span>
-                    <input placeholder={configured.model} value={editing.value}
-                      onChange={(event) => setEditing({ ...editing, value: event.target.value })} /></label>
-                  <label className="field"><span>{t("brandIcon")}</span>
-                    <select value={editing.brand} onChange={(event) => setEditing({ ...editing, brand: event.target.value as Mark["brand"] })}>
-                      <option value="auto">{t("automaticBrand")}</option>
-                      {brands.map((brand) => <option value={brand} key={brand}>{t(brand)}</option>)}
-                    </select></label>
-                  <label className="field"><span>{t("numberBadge")}</span>
-                    <input inputMode="numeric" maxLength={2} value={editing.badge}
-                      onChange={(event) => setEditing({ ...editing, badge: event.target.value.replace(/[^0-9]/g, "") })} /></label>
-                </div>
-                <div className="form-actions"><button type="submit" className="primary-action">{t("save")}</button></div>
-              </form>
-            </section>
-            <ProfileEditor profile={currentProfile} update={(profile) => saveProfile(configured.serial, profile)} t={t} />
-            <button type="button" data-tip={t("previewHint")} onClick={() => void previewProfile()}>{t("previewArgs")}</button>
-            {preview?.serial === configured.serial && preview.profile === currentProfile &&
-              <pre>{JSON.stringify(preview.args, null, 2)}</pre>}
+          <div className="device-settings-layout">
+            <nav className="device-settings-nav" aria-label={t("deviceSettings")}>
+              {deviceSettingsSections.map(([section, Glyph]) => <button key={section} type="button"
+                className="icon-button" aria-label={t(section)}
+                aria-pressed={deviceSettingsSection === section} data-tip={t(section)}
+                onClick={() => {
+                  setDeviceSettingsSection(section);
+                  setActionError(undefined);
+                  if (deviceSettingsBody.current) deviceSettingsBody.current.scrollTop = 0;
+                }}>
+                <Glyph aria-hidden="true" />
+              </button>)}
+            </nav>
+            <div className="device-settings-body" ref={deviceSettingsBody}>
+              {deviceSettingsSection === "editDevice" ? <section className="device-settings-section">
+                <h2>{t("editDevice")}</h2>
+                <form onSubmit={(event) => { event.preventDefault(); saveAlias(); }} onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.nativeEvent.isComposing && event.target instanceof HTMLInputElement) {
+                    event.preventDefault();
+                    saveAlias();
+                  }
+                }}>
+                  <div className="field-grid">
+                    <label className="field" data-tip={t("saveOnEnter")}><span>{t("rename")}</span>
+                      <input placeholder={configured.model} value={editing.value}
+                        onChange={(event) => setEditing({ ...editing, value: event.target.value })} /></label>
+                    <label className="field"><span>{t("brandIcon")}</span>
+                      <select value={editing.brand} onChange={(event) => {
+                        const brand = event.target.value as Mark["brand"];
+                        setEditing({ ...editing, brand });
+                        saveDeviceMark(editing.serial, { ...(marks[editing.serial] ?? defaultMark), brand });
+                      }}>
+                        <option value="auto">{t("automaticBrand")}</option>
+                        {brands.map((brand) => <option value={brand} key={brand}>{t(brand)}</option>)}
+                      </select></label>
+                    <label className="field" data-tip={t("saveOnEnter")}><span>{t("numberBadge")}</span>
+                      <input inputMode="numeric" maxLength={2} value={editing.badge}
+                        onChange={(event) => setEditing({ ...editing, badge: event.target.value.replace(/[^0-9]/g, "") })} /></label>
+                  </div>
+                </form>
+              </section> : deviceSettingsSection === "launchPreview" ? <LaunchArgumentsEditor
+                key={configured.serial} args={currentProfile.extraArgs} t={t}
+                update={(extraArgs) => saveProfile(configured.serial, { ...currentProfile, extraArgs })}
+                inspect={(args) => void previewProfile(args)}
+                preview={preview?.serial === configured.serial && preview.title === deviceName(configured)
+                  && JSON.stringify(preview.profile) === JSON.stringify(currentProfile)
+                  ? preview.args : undefined} />
+                : <ProfileEditor section={deviceSettingsSection} placementSerial={configured.serial}
+                  serial={configured.status === "online" ? configured.serial : undefined}
+                  sdk={facts[configured.serial]?.sdk} screen={facts[configured.serial]?.size} profile={currentProfile}
+                  update={(profile) => saveProfile(configured.serial, profile)} t={t} />}
+            </div>
           </div>
         </section>}
         {deleteRequest && <section className="panel controls shortcut-editor delete-dialog" role="dialog" aria-label={t("deleteDevice")}>

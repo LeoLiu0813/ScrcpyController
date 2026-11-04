@@ -11,6 +11,7 @@ mod tray;
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(devices::Sessions::default())
         .manage(tray::TrayState::default())
         .setup(|app| {
@@ -24,6 +25,7 @@ pub fn run() {
             devices::list_devices,
             tray::tray_sync,
             engine_update::engine_status,
+            engine_update::engine_options,
             engine_update::check_engine_update,
             engine_update::install_engine_update,
             engine_update::rollback_engine,
@@ -33,13 +35,19 @@ pub fn run() {
             connections::disconnect_wireless,
             devices::open_device,
             devices::mirror_info,
-            devices::mirror_fps,
+            devices::lock_device,
+            devices::mirror_stats,
             devices::mirror_position,
             devices::mirror_prepare_input,
             devices::mirror_save_placement,
+            mirror::last_mirror_placement,
             devices::mirror_action,
             devices::stop_device,
             devices::run_tool,
+            devices::choose_local_paths,
+            devices::capture_crop_preview,
+            devices::reveal_capture,
+            devices::transfer_files,
             devices::query_device,
             devices::list_apps,
             devices::app_icon,

@@ -163,6 +163,10 @@ async fn dispatch(app: &AppHandle, request: Request) -> Result<Value, &'static s
                 crate::tray::open_device(app, serial).await?;
                 Ok(json!({ "opened": true }))
             }
+            ("lock", Some(serial)) => {
+                devices::lock_device(app.clone(), serial).await?;
+                Ok(json!({ "locked": true }))
+            }
             ("exit", None) => Ok(json!({ "exiting": true })),
             _ => Err("invalidArguments"),
         },

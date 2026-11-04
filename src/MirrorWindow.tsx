@@ -1,5 +1,9 @@
+import { ArrowLeft, House, PanelsTopLeft, Volume2, Volume1, Camera, Maximize, Bell,
+  LayoutGrid, LockKeyhole, Smartphone, RotateCw, Scan, MoveHorizontal, Pause, Play,
+  RotateCcw, Copy, FolderUp, FolderOpen, ClipboardPaste, Pin, PanelRightClose,
+  PanelRightOpen, Minus, Maximize2, X, Plus, Ellipsis } from "lucide-react";
 import { flushSync } from "react-dom";
-import { useEffect, useRef, useState, type CSSProperties, type DragEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow, LogicalSize, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/window";
@@ -9,41 +13,25 @@ import { loadMap, type Shortcut } from "./Workflows";
 import "./MirrorWindow.css";
 
 const icons = {
-  back: "M20 12H4m7-7-7 7 7 7",
-  home: "m3 11 9-8 9 8M6 10v10h12V10m-8 10v-6h4v6",
-  recents: "M4 8h13v12H4zM8 8V4h12v12h-3",
-  volumeUp: "M3 9h4l5-4v14l-5-4H3zM17 9v6m-3-3h6",
-  volumeDown: "M3 9h4l5-4v14l-5-4H3zM15 12h6",
-  screenshot: "M4 7h4l2-3h4l2 3h4v13H4zM15 13a3 3 0 1 1-6 0 3 3 0 0 1 6 0",
-  fullscreen: "M4 9V4h5m6 0h5v5m0 6v5h-5m-6 0H4v-5",
-  notifications: "M5 17h14l-2-4V9a5 5 0 0 0-10 0v4zM10 21h4",
-  quickSettings: "M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z",
-  screenPower: "M5 11h14v9H5zM8 11V8a4 4 0 0 1 8 0v3m-4 4v2",
-  screenOff: "M7 3h10a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm4 15h2M3 3l18 18",
-  rotate: "M19 8a8 8 0 0 0-13-2l-2 2m0-5v5h5m-4 8a8 8 0 0 0 13 2l2-2m0 5v-5h-5",
-  actual: "M4 5h16v14H4zm4 4h8v6H8z",
-  fit: "M3 5h18v14H3zm4 7h10m-7-3-3 3 3 3m4-6 3 3-3 3",
-  pause: "M9 5v14m6-14v14",
-  resetVideo: "M20 10a8 8 0 1 0-1 7m1-13v6h-6",
-  copyScreenshot: "M8 8h12v12H8zM4 16V4h12",
-  captureFolder: "M3 6h7l2 2h9v12H3z",
-  paste: "M8 5H5v15h14V5h-3M8 3h8v5H8zm1 9h6m-6 4h6",
-} as const;
+  back: ArrowLeft, home: House, recents: PanelsTopLeft, volumeUp: Volume2, volumeDown: Volume1,
+  screenshot: Camera, fullscreen: Maximize, notifications: Bell, quickSettings: LayoutGrid,
+  screenPower: LockKeyhole, screenOff: Smartphone, rotate: RotateCw, actual: Scan,
+  fit: MoveHorizontal, pause: Pause, resetVideo: RotateCcw, copyScreenshot: Copy,
+  sendFiles: FolderUp, captureFolder: FolderOpen, paste: ClipboardPaste,
+};
 type Action = keyof typeof icons;
 type Zone = "rail" | "more";
 type Layout = {
   opacity: number; visible: boolean; rail: Action[]; more: Action[];
   buttonColor: string; buttonOpacity: number; frameBorder: number; pictureRadius: number;
 };
-type MirrorInfo = [title: string, width: number, height: number, serial: string, virtual: boolean, follow: boolean];
-const pinIcon = "M9 3h6l-1 6 4 4v2H6v-2l4-4zM12 15v6";
-const appIcon = "M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z";
+type MirrorInfo = [title: string, width: number, height: number, serial: string, virtual: boolean, follow: boolean, recording: boolean];
 
 const initial: Layout = {
   opacity: 88, visible: true, buttonColor: "#2a2b36", buttonOpacity: 100, frameBorder: 3, pictureRadius: 5,
   rail: ["back", "home", "recents", "volumeUp", "volumeDown", "screenshot", "fullscreen"],
   more: ["notifications", "quickSettings", "screenPower", "screenOff", "rotate", "actual", "fit",
-    "pause", "resetVideo", "copyScreenshot", "captureFolder", "paste"],
+    "pause", "resetVideo", "copyScreenshot", "captureFolder", "sendFiles", "paste"],
 };
 const storageKey = "mirror-window-layout";
 function readLayout(): Layout {
@@ -95,50 +83,111 @@ function useLayout() {
   return layout;
 }
 
-export function MirrorAppearance({ t }: { t: (key: Message) => string }) {
-  const layout = useLayout();
-  return <section className="panel controls">
-    <h2>{t("mirrorAppearance")}</h2>
-    <div className="tool-row">
-      <label className="field">
-        <span>{t("windowOpacity")} · {layout.opacity}%</span>
-        <input type="range" min="20" max="100" value={layout.opacity}
-          onChange={(event) => saveLayout({ ...readLayout(), opacity: Number(event.target.value) })} />
-      </label>
-      <label className="field">
-        <span>{t("mirrorButtonColor")}</span>
-        <input className="mirror-color-input" type="color" value={layout.buttonColor}
-          onChange={(event) => saveLayout({ ...readLayout(), buttonColor: event.target.value })} />
-      </label>
-      <label className="field">
-        <span>{t("mirrorButtonOpacity")} · {layout.buttonOpacity}%</span>
-        <input type="range" min="0" max="100" value={layout.buttonOpacity}
-          onChange={(event) => saveLayout({ ...readLayout(), buttonOpacity: Number(event.target.value) })} />
-      </label>
-      <label className="field">
-        <span>{t("mirrorBackgroundInset")} · {layout.frameBorder} {t("mirrorPixelUnit")}</span>
-        <input type="range" min="0" max="12" value={layout.frameBorder}
-          onChange={(event) => saveLayout({ ...readLayout(), frameBorder: Number(event.target.value) })} />
-      </label>
-      <label className="field">
-        <span>{t("mirrorPictureRadius")} · {layout.pictureRadius} {t("mirrorPixelUnit")}</span>
-        <input type="range" min="0" max="24" value={layout.pictureRadius}
-          onChange={(event) => saveLayout({ ...readLayout(), pictureRadius: Number(event.target.value) })} />
-      </label>
-      <label className="check">
-        <input type="checkbox" checked={layout.visible}
-          onChange={(event) => saveLayout({ ...readLayout(), visible: event.target.checked })} />
-        {t("mirrorToolbarVisible")}
-      </label>
-      <button type="button" onClick={() => saveLayout({ ...readLayout(), rail: initial.rail, more: initial.more })}>
-        {t("mirrorResetLayout")}
-      </button>
+function ButtonColorPicker({ color, update, t }: { color: string; update: (color: string) => void; t: (key: Message) => string }) {
+  const [open, setOpen] = useState(false);
+  const [red, green, blue] = [1, 3, 5].map((offset) => parseInt(color.slice(offset, offset + 2), 16) / 255);
+  const brightness = Math.max(red, green, blue);
+  const spread = brightness - Math.min(red, green, blue);
+  const rememberedSaturation = useRef(0);
+  const saturation = brightness ? spread / brightness : rememberedSaturation.current;
+  const hue = !spread ? 0 : (60 * (brightness === red ? (green - blue) / spread
+    : brightness === green ? 2 + (blue - red) / spread : 4 + (red - green) / spread) + 360) % 360;
+  const rememberedHue = useRef(hue);
+  if (spread) rememberedHue.current = hue;
+  const angle = rememberedHue.current * Math.PI / 180;
+
+  function select(h: number, s: number, v: number) {
+    rememberedHue.current = h;
+    rememberedSaturation.current = s;
+    const channel = (offset: number) => {
+      const k = (offset + h / 60) % 6;
+      return Math.round(v * (1 - s * Math.max(0, Math.min(k, 4 - k, 1))) * 255).toString(16).padStart(2, "0");
+    };
+    update(`#${channel(5)}${channel(3)}${channel(1)}`);
+  }
+
+  function point(event: PointerEvent<HTMLButtonElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = (event.clientX - rect.left) / rect.width * 2 - 1;
+    const y = (event.clientY - rect.top) / rect.height * 2 - 1;
+    select((Math.atan2(y, x) * 180 / Math.PI + 360) % 360, Math.min(1, Math.hypot(x, y)), brightness || 1);
+  }
+
+  return <div className="settings-stack">
+    <div className="settings-color-row">
+      <span>{t("mirrorButtonColor")}</span>
+      <button type="button" className="icon-button color-swatch" aria-expanded={open}
+        aria-label={`${t("mirrorButtonColor")} · ${color}`}
+        style={{ "--swatch": color } as CSSProperties} onClick={() => setOpen(!open)} />
     </div>
-  </section>;
+    {open && <div className="color-picker settings-stack">
+      <button type="button" className="icon-button color-wheel" aria-label={t("colorWheel")}
+        style={{ "--wheel-shade": 1 - brightness, "--color-x": `${50 + Math.cos(angle) * saturation * 50}%`,
+          "--color-y": `${50 + Math.sin(angle) * saturation * 50}%`, "--swatch": color } as CSSProperties}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          event.currentTarget.setPointerCapture(event.pointerId);
+          point(event);
+        }}
+        onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) point(event); }}
+        onKeyDown={(event) => {
+          const delta = { ArrowLeft: -5, ArrowRight: 5, ArrowDown: -.05, ArrowUp: .05 }[event.key];
+          if (delta === undefined) return;
+          event.preventDefault();
+          if (Math.abs(delta) > 1) select((rememberedHue.current + delta + 360) % 360, saturation || 1, brightness || 1);
+          else select(rememberedHue.current, Math.max(0, Math.min(1, saturation + delta)), brightness || 1);
+        }} />
+      <label className="field"><span>{t("colorBrightness")} · {Math.round(brightness * 100)}%</span>
+        <input type="range" min="0" max="100" value={Math.round(brightness * 100)}
+          onChange={(event) => select(rememberedHue.current, saturation, Number(event.target.value) / 100)} />
+      </label>
+    </div>}
+  </div>;
 }
 
-function Icon({ path }: { path: string }) {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d={path} /></svg>;
+export function MirrorAppearance({ t }: { t: (key: Message) => string }) {
+  const layout = useLayout();
+  return <section className="panel controls settings-card">
+    <h2>{t("mirrorAppearance")}</h2>
+    <div className="settings-grid">
+      <div className="settings-stack settings-subgroup">
+        <h3>{t("pictureStyle")}</h3>
+        <label className="field">
+          <span>{t("windowOpacity")} · {layout.opacity}%</span>
+          <input type="range" min="20" max="100" value={layout.opacity}
+            onChange={(event) => saveLayout({ ...readLayout(), opacity: Number(event.target.value) })} />
+        </label>
+        <label className="field">
+          <span>{t("mirrorBackgroundInset")} · {layout.frameBorder} {t("mirrorPixelUnit")}</span>
+          <input type="range" min="0" max="12" value={layout.frameBorder}
+            onChange={(event) => saveLayout({ ...readLayout(), frameBorder: Number(event.target.value) })} />
+        </label>
+        <label className="field">
+          <span>{t("mirrorPictureRadius")} · {layout.pictureRadius} {t("mirrorPixelUnit")}</span>
+          <input type="range" min="0" max="24" value={layout.pictureRadius}
+            onChange={(event) => saveLayout({ ...readLayout(), pictureRadius: Number(event.target.value) })} />
+        </label>
+      </div>
+      <div className="settings-stack settings-subgroup">
+        <h3>{t("buttonStyle")}</h3>
+        <ButtonColorPicker color={layout.buttonColor} t={t}
+          update={(buttonColor) => saveLayout({ ...readLayout(), buttonColor })} />
+        <label className="field">
+          <span>{t("mirrorButtonOpacity")} · {layout.buttonOpacity}%</span>
+          <input type="range" min="0" max="100" value={layout.buttonOpacity}
+            onChange={(event) => saveLayout({ ...readLayout(), buttonOpacity: Number(event.target.value) })} />
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={layout.visible}
+            onChange={(event) => saveLayout({ ...readLayout(), visible: event.target.checked })} />
+          {t("mirrorToolbarVisible")}
+        </label>
+        <div><button type="button" onClick={() => saveLayout({ ...readLayout(), rail: initial.rail, more: initial.more })}>
+          {t("mirrorResetLayout")}
+        </button></div>
+      </div>
+    </div>
+  </section>;
 }
 
 type Drop = { zone: Zone; before?: Action; after?: boolean };
@@ -154,6 +203,8 @@ export default function MirrorWindow() {
   const [info, setInfo] = useState<MirrorInfo>();
   const [deviceTitle, setDeviceTitle] = useState<string>();
   const [fps, setFps] = useState<number | null>(null);
+  const [frameSize, setFrameSize] = useState<[number, number]>();
+  const textureSwap = useRef<boolean>(undefined);
   const [lockedWidth, setLockedWidth] = useState<number>();
   const [lockedPicture, setLockedPicture] = useState<[number, number]>();
   const changingSidebar = useRef(false);
@@ -162,6 +213,10 @@ export default function MirrorWindow() {
   const [launchingApp, setLaunchingApp] = useState<string>();
   const iconRequests = useRef(new Set<string>());
   const [more, setMore] = useState(false);
+  const moreOpen = useRef(false);
+  const dismissMoreAfterInteraction = useRef(false);
+  const dismissMoreOnRestore = useRef(false);
+  const dismissMoreHandler = useRef<() => void>(() => {});
   const [outside, setOutside] = useState(false);
   const extension = useRef<{ left: number; expandedLeft: number }>(undefined);
   const menuPending = useRef(false);
@@ -202,17 +257,21 @@ export default function MirrorWindow() {
         }),
       );
     });
+    const blur = listen(`mirror-blur-${shell.label}`, () => dismissMoreHandler.current());
     void shell.isFullscreen().then(setFullscreen);
     void shell.isAlwaysOnTop().then(setTop);
     invoke<MirrorInfo>("mirror_info").then(setInfo).catch(() => setError("mirrorFrameFailed"));
     return () => {
       window.removeEventListener("storage", syncLocale);
       void bridge.then((unlisten) => unlisten());
+      void blur.then((unlisten) => unlisten()).catch(() => {});
     };
   }, []);
 
   const serial = info?.[4] ? undefined : info?.[3];
   const windowTitle = deviceTitle ?? info?.[0];
+  const [baseWidth, baseHeight] = (ready ? frameSize : undefined) ?? [info?.[1] ?? 1, info?.[2] ?? 1];
+  const [sourceWidth, sourceHeight] = landscape ? [baseHeight, baseWidth] : [baseWidth, baseHeight];
   useEffect(() => {
     if (!serial) return;
     const sync = () => {
@@ -232,7 +291,18 @@ export default function MirrorWindow() {
     if (!info) return;
     let active = true;
     const poll = () => {
-      void invoke<number | null>("mirror_fps").then((count) => { if (active) setFps(count); }).catch(() => {});
+      void invoke<[number | null, [number, number] | null]>("mirror_stats").then(([count, size]) => {
+        if (!active) return;
+        setFps(count);
+        if (!size || info[5]) return;
+        const [width, height] = size;
+        // The initial window already reflects any launch-time display rotation.
+        if (width !== height && info[1] !== info[2]) {
+          textureSwap.current ??= (width > height) !== (info[1] > info[2]);
+        }
+        const next: [number, number] = textureSwap.current ? [height, width] : size;
+        setFrameSize((current) => current?.[0] === next[0] && current[1] === next[1] ? current : next);
+      }).catch(() => {});
     };
     poll();
     const timer = setInterval(poll, 1000);
@@ -347,13 +417,16 @@ export default function MirrorWindow() {
         if (!surface || stopped) return;
         const rect = surface.getBoundingClientRect();
         const pixels = (n: number) => Math.round(n * window.devicePixelRatio);
-        const ratio = landscape ? info[2] / info[1] : info[1] / info[2];
-        const width = info[5] ? rect.width : Math.min(rect.width, rect.height * ratio);
-        const height = info[5] ? rect.height : Math.min(rect.height, rect.width / ratio);
+        const left = pixels(rect.left), top = pixels(rect.top);
+        const availableWidth = pixels(rect.right) - left;
+        const availableHeight = pixels(rect.bottom) - top;
+        // Match scrcpy's integer aspect fit to avoid exposing its clear color along an edge.
+        const width = info[5] ? availableWidth : Math.min(availableWidth, Math.floor(availableHeight * sourceWidth / sourceHeight));
+        const height = info[5] ? availableHeight : Math.min(availableHeight, Math.floor(availableWidth * sourceHeight / sourceWidth));
         const bounds = {
-          x: pixels(rect.x + (rect.width - width) / 2),
-          y: pixels(rect.y + (rect.height - height) / 2),
-          width: pixels(width), height: pixels(height),
+          x: left + Math.round((availableWidth - width) / 2),
+          y: top + Math.round((availableHeight - height) / 2),
+          width, height,
           radius: pixels(layout.pictureRadius),
         };
         const key = `${bounds.x},${bounds.y},${bounds.width},${bounds.height},${bounds.radius}`;
@@ -380,7 +453,7 @@ export default function MirrorWindow() {
       window.removeEventListener("resize", update);
       cancelAnimationFrame(frame);
     };
-  }, [info, landscape, layout.pictureRadius]);
+  }, [info, sourceWidth, sourceHeight, layout.pictureRadius]);
 
   async function savePlacement() {
     if (priming.current || menuPending.current || extension.current) return;
@@ -394,7 +467,15 @@ export default function MirrorWindow() {
       clearTimeout(saving.current);
       saving.current = setTimeout(() => void savePlacement().catch(() => {}), 220);
     };
-    const listeners = [shell.onMoved(queue), shell.onResized(queue), shell.onFocusChanged(({ payload }) => {
+    if (info && !info[4]) queue();
+    const resumeDismissal = () => {
+      if (dismissMoreOnRestore.current) dismissMoreHandler.current();
+    };
+    const listeners = [shell.onMoved(queue), shell.onResized(() => {
+      queue();
+      resumeDismissal();
+    }), shell.onFocusChanged(({ payload }) => {
+      if (payload) resumeDismissal();
       if (payload && !inputReady.current) {
         void invoke<boolean>("mirror_prepare_input").then((focused) => { inputReady.current = focused; }).catch(() => {});
       }
@@ -403,22 +484,30 @@ export default function MirrorWindow() {
       clearTimeout(saving.current);
       for (const listener of listeners) void listener.then((unlisten) => unlisten()).catch(() => {});
     };
-  }, [ready, shell]);
+  }, [ready, shell, info]);
+
+  function dismissMore() {
+    dismissMoreAfterInteraction.current = menuPending.current || (moreOpen.current && !!dragRef.current);
+    if (moreOpen.current && !dismissMoreAfterInteraction.current) {
+      void changeMore(false).catch(() => setError("mirrorFrameFailed"));
+    }
+  }
+  dismissMoreHandler.current = dismissMore;
 
   async function changeMore(open: boolean) {
-    if ((open && busy) || open === more) return;
-    await changeRightPanel(open, menuWidth, setMore);
-  }
-
-  async function changeRightPanel(open: boolean, panelWidth: number, setOpen: (open: boolean) => void) {
-    if (priming.current || menuPending.current) return;
+    if ((open && busy) || open === moreOpen.current || priming.current || menuPending.current) return;
     menuPending.current = true;
+    const setOpen = (value: boolean) => {
+      moreOpen.current = value;
+      setMore(value);
+    };
     const frame = document.querySelector(".mirror-shell");
     const widthBefore = frame?.getBoundingClientRect().width;
     const waitWidth = async (width: number) => {
       const deadline = performance.now() + 450;
       while (Math.abs(innerWidth - width) > 1 && performance.now() < deadline) {
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        // A minimized window may stop producing animation frames.
+        await new Promise<void>((resolve) => setTimeout(resolve, 16));
       }
     };
     try {
@@ -426,7 +515,7 @@ export default function MirrorWindow() {
         const [size, position, monitor, scale] = await Promise.all([
           shell.innerSize(), shell.outerPosition(), currentMonitor(), shell.scaleFactor(),
         ]);
-        const width = Math.round(panelWidth * scale);
+        const width = Math.round(menuWidth * scale);
         const right = monitor ? monitor.workArea.position.x + monitor.workArea.size.width : position.x + size.width + width;
         const expandedLeft = Math.max(monitor?.workArea.position.x ?? position.x, Math.min(position.x, right - size.width - width));
         if (!monitor || size.width + width <= monitor.workArea.size.width) {
@@ -444,10 +533,13 @@ export default function MirrorWindow() {
           return;
         }
       } else if (!open && extension.current) {
+        dismissMoreOnRestore.current = true;
+        if (await shell.isMinimized()) return;
+        dismissMoreOnRestore.current = false;
         const saved = extension.current;
         const [size, position, scale] = await Promise.all([shell.innerSize(), shell.outerPosition(), shell.scaleFactor()]);
         flushSync(() => setLockedWidth(widthBefore));
-        const width = Math.max(Math.round(minimumWidth * scale), size.width - Math.round(panelWidth * scale));
+        const width = Math.max(Math.round(minimumWidth * scale), size.width - Math.round(menuWidth * scale));
         await shell.setSize(new PhysicalSize(width, size.height));
         await waitWidth(width / scale);
         flushSync(() => { setOpen(false); setOutside(false); });
@@ -463,6 +555,7 @@ export default function MirrorWindow() {
       }
       setCaption("");
       menuPending.current = false;
+      if (dismissMoreAfterInteraction.current && !dismissMoreOnRestore.current) dismissMore();
     }
   }
 
@@ -492,7 +585,7 @@ export default function MirrorWindow() {
       }
       const box = viewport.current.getBoundingClientRect();
       const frame = document.querySelector(".mirror-shell")?.getBoundingClientRect();
-      const ratio = landscape ? info[2] / info[1] : info[1] / info[2];
+      const ratio = sourceWidth / sourceHeight;
       const width = info[5] ? box.width : Math.min(box.width, box.height * ratio);
       const height = info[5] ? box.height : Math.min(box.height, box.width / ratio);
       const [scale, origin] = await Promise.all([shell.scaleFactor(), shell.outerPosition()]);
@@ -550,12 +643,11 @@ export default function MirrorWindow() {
         await shell.setFullscreen(!fullscreen);
         setFullscreen(!fullscreen);
         setReveal(false);
-        setMore(false);
       } else if (action === "actual" || action === "fit") {
         if (!info || !viewport.current) return;
         if (more) await changeMore(false);
         const box = viewport.current.getBoundingClientRect();
-        const ratio = landscape ? info[2] / info[1] : info[1] / info[2];
+        const ratio = sourceWidth / sourceHeight;
         const width = action === "actual" ? info[landscape ? 2 : 1] / devicePixelRatio : Math.min(box.width, box.height * ratio);
         const shellBox = document.querySelector(".mirror-shell")?.getBoundingClientRect();
         const scale = await shell.scaleFactor();
@@ -584,6 +676,7 @@ export default function MirrorWindow() {
     dragRef.current = undefined;
     setDragging(undefined);
     setInsertion(undefined);
+    if (dismissMoreAfterInteraction.current) dismissMore();
   }
   function dragOver(event: DragEvent, target: Drop) {
     if (!dragRef.current) return;
@@ -615,6 +708,7 @@ export default function MirrorWindow() {
 
   function tile(action: Action, index: number, zone: Zone) {
     const label = buttonLabel(action);
+    const Glyph = action === "pause" && paused ? Play : icons[action];
     const insert = insertion?.zone === zone && insertion.before === action;
     const target = (event: DragEvent): Drop => {
       const rect = event.currentTarget.getBoundingClientRect();
@@ -633,7 +727,7 @@ export default function MirrorWindow() {
           event.dataTransfer.effectAllowed = "move";
           event.dataTransfer.setData("text/plain", action);
         }} onDragEnd={dragEnd}>
-        <Icon path={action === "pause" && paused ? "m8 5 12 7-12 7z" : icons[action]} />
+        <Glyph aria-hidden="true" />
       </button>
     </div>;
   }
@@ -644,20 +738,24 @@ export default function MirrorWindow() {
     const knownAction = (value: string) => Object.prototype.hasOwnProperty.call(icons, value);
     switch (operation) {
       case "state": {
-        const box = (selector: string) => {
-          const r = document.querySelector(selector)?.getBoundingClientRect();
+        const rect = (element: Element | null) => {
+          const r = element?.getBoundingClientRect();
           return r ? [r.x, r.y, r.width, r.height] : null;
         };
+        const box = (selector: string) => rect(document.querySelector(selector));
         const appList = document.querySelector(".mirror-apps");
-        const button = document.querySelector(".mirror-toolbar .icon-button");
+        const button = document.querySelector(".mirror-list .icon-button") ?? document.querySelector(".mirror-toolbar > button");
         return { layout: readLayout(), fullscreen: await shell.isFullscreen(), more, outside,
           shell: box(".mirror-shell"), rail: box(".mirror-toolbar"), menu: box(".mirror-more"),
           pinned: await shell.isAlwaysOnTop(), sidebar: sidebarEnabled, appCount: apps.length,
           appScroll: appList ? { height: appList.clientHeight, content: appList.scrollHeight } : null,
           buttonBackground: button ? getComputedStyle(button).backgroundColor : null,
           backgroundInset: getComputedStyle(document.querySelector(".mirror-video")!).paddingLeft, fps,
+          fpsDisplay: box(".mirror-toolbar .mirror-fps"), navigation: box(".mirror-toolbar .mirror-list"), railButton: rect(button),
+          captionButtons: Array.from(document.querySelectorAll(".mirror-caption-actions .icon-button"), rect),
           virtual: !!info?.[4], follow: !!info?.[5], ready,
           title: windowTitle,
+          sourceSize: info ? [sourceWidth, sourceHeight] : null,
           videoViewport: box(".mirror-video-viewport"),
           error };
       }
@@ -676,12 +774,13 @@ export default function MirrorWindow() {
         return readLayout();
       }
       case "tip": {
-        if (args.length !== 1 || !knownAction(action)) throw "invalidArguments";
+        const frameRate = args[0] === "fps";
+        if (args.length !== 1 || (!frameRate && !knownAction(action))) throw "invalidArguments";
         if (readLayout().more.includes(action) && !more) {
           await changeMore(true);
           await settle();
         }
-        const button = document.querySelector(`[data-mirror-action="${action}"]`);
+        const button = document.querySelector(frameRate ? ".mirror-fps" : `[data-mirror-action="${action}"]`);
         if (!button) throw "mirrorActionFailed";
         button.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, pointerType: "mouse" }));
         try {
@@ -785,7 +884,7 @@ export default function MirrorWindow() {
 
   const toolbarVisible = sidebarEnabled && (!fullscreen || reveal);
   const allowed = (action: Action) => !info?.[4] || ![
-    "screenshot", "copyScreenshot", "screenPower", "screenOff", "notifications", "quickSettings", "captureFolder",
+    "screenshot", "copyScreenshot", "screenPower", "screenOff", "notifications", "quickSettings", "captureFolder", "sendFiles",
   ].includes(action);
   const moreItems = layout.more.filter(allowed);
   const railItems = layout.rail.filter(allowed);
@@ -807,33 +906,33 @@ export default function MirrorWindow() {
   } as CSSProperties} className={`mirror-more${outside ? " mirror-more-outside" : ""}`}
     onDragOver={(event) => dragOver(event, { zone: "more" })} onDrop={(event) => drop(event, { zone: "more" })}>
     {moreItems.map((action, index) => tile(action, index, "more"))}
-    {!moreItems.length && <div className="mirror-empty-menu" {...tip(t("mirrorDropHere"))}><Icon path="M12 5v14m-7-7h14" /></div>}
+    {!moreItems.length && <div className="mirror-empty-menu" {...tip(t("mirrorDropHere"))}><Plus aria-hidden="true" /></div>}
   </div>;
   return <><div className={`mirror-shell${fullscreen ? " is-fullscreen" : ""}`} style={{ ...chrome, width: lockedWidth }}>
     {!fullscreen && <div className="mirror-titlebar" data-tauri-drag-region>
       <span className="mirror-device-title" data-tauri-drag-region>
         <span data-tauri-drag-region>{windowTitle ?? t("mirrorStarting")}</span>
-        <span className="mirror-fps" data-tauri-drag-region>{fps ?? "—"}</span>
+        {info?.[6] && <span className="mirror-recording" data-tauri-drag-region>● {t("recordingActive")}</span>}
       </span>
       <span className="mirror-caption" data-tauri-drag-region>{caption}</span>
       <div className="mirror-caption-actions">
         <button type="button" className="icon-button" aria-expanded={sidebarEnabled}
           {...tip(t(sidebarEnabled ? "mirrorCollapseSidebar" : "mirrorExpandSidebar"))}
           onClick={() => void toggleSidebar().catch(() => setError("mirrorFrameFailed"))}>
-          <Icon path={sidebarEnabled ? "M3 4h18v16H3zm12 0v16m-7-11 3 3-3 3" : "M3 4h18v16H3zm12 0v16m-4-11-3 3 3 3"} />
+          {sidebarEnabled ? <PanelRightClose aria-hidden="true" /> : <PanelRightOpen aria-hidden="true" />}
         </button>
         <button type="button" className="icon-button mirror-pin" aria-pressed={top}
           {...tip(t(top ? "mirrorUnpin" : "mirrorPin"))}
           onClick={() => void togglePin().catch(() => setError("mirrorActionFailed"))}>
-          <Icon path={pinIcon} />
+          <Pin aria-hidden="true" />
         </button>
         {([
-          ["mirrorMinimize", "M5 12h14", () => shell.minimize()],
-          ["mirrorMaximize", "M5 5h14v14H5z", async () => { if (menuPending.current) return; if (more) await changeMore(false); await shell.toggleMaximize(); }],
-          ["mirrorClose", "m6 6 12 12M18 6 6 18", async () => { await savePlacement().catch(() => {}); await shell.close(); }],
-        ] as const).map(([label, path, run]) => <button key={label} type="button" className="icon-button"
+          ["mirrorMinimize", Minus, async () => { if (more) await changeMore(false); await shell.minimize(); }],
+          ["mirrorMaximize", Maximize2, async () => { if (menuPending.current) return; if (more) await changeMore(false); await shell.toggleMaximize(); }],
+          ["mirrorClose", X, async () => { await savePlacement().catch(() => {}); await shell.close(); }],
+        ] as const).map(([label, Glyph, run]) => <button key={label} type="button" className="icon-button"
           {...tip(t(label))} onClick={() => void run().catch(() => setError("mirrorFrameFailed"))}>
-          <Icon path={path} />
+          <Glyph aria-hidden="true" />
         </button>)}
       </div>
     </div>}
@@ -852,6 +951,7 @@ export default function MirrorWindow() {
         if (fullscreen && !dragging && !more) setReveal(false);
       }}>
         <aside className="mirror-toolbar">
+          <output className="icon-button mirror-fps" {...tip(t("frameRateReadout"))} aria-live="off">{fps ?? "—"}</output>
           <div className={`mirror-list${insertion?.zone === "rail" && !insertion.before ? " insert-after" : ""}`}
             onDragOver={(event) => dragOver(event, { zone: "rail" })}
             onDrop={(event) => drop(event, { zone: "rail" })}>
@@ -863,7 +963,7 @@ export default function MirrorWindow() {
               return <button key={id} type="button" className="icon-button mirror-app"
                 {...tip(name || id)} aria-busy={launchingApp === id}
                 onClick={() => void launchShortcut(shortcut).catch(() => {})}>
-                {appIcons[id] ? <img src={appIcons[id]} alt="" draggable={false} /> : <Icon path={appIcon} />}
+                {appIcons[id] ? <img src={appIcons[id]} alt="" draggable={false} /> : <LayoutGrid aria-hidden="true" />}
               </button>;
             })}
           </div>}
@@ -874,7 +974,7 @@ export default function MirrorWindow() {
             }}
             onDragLeave={() => { clearTimeout(hoverTimer.current); hoverTimer.current = undefined; }}
             onDrop={(event) => drop(event, { zone: "more" })}>
-            <Icon path="M5 12h.01m7 0h.01m7 0h.01" />
+            <Ellipsis aria-hidden="true" />
           </button>
         </aside>
         {!outside && moreMenu}

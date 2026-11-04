@@ -1,3 +1,4 @@
+import { ChevronDown } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { Translate } from "./Workflows";
 
@@ -78,7 +79,7 @@ export default function PhoneAppPicker({ apps, selected, disabled, readOnly, onS
         onClick={() => {
           if (expanded) close();
           else { input.current?.focus(); setOpen(true); }
-        }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg></button>}
+        }}><ChevronDown aria-hidden="true" /></button>}
       {expanded && <div className="phone-app-results">
         <ul id={`${id}-list`} ref={list} role="listbox" aria-label={t("choosePhoneApp")}>
           {matches.map((app, index) => <li id={`${id}-option-${index}`} key={app.package} role="option"

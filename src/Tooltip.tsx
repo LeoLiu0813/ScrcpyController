@@ -27,7 +27,7 @@ export default function Tooltip() {
       tip.showPopover();
       const rect = target.getBoundingClientRect();
       const { width, height } = tip.getBoundingClientRect();
-      const side = target.closest(".rail") && rect.right + width + 8 <= window.innerWidth;
+      const side = target.closest(".rail, .device-settings-nav") && rect.right + width + 8 <= window.innerWidth;
       const x = side ? rect.right + 6 : rect.right - width;
       const y = side ? rect.top : rect.top >= height + 8 ? rect.top - height - 6 : rect.bottom + 6;
       tip.style.left = `${Math.max(6, Math.min(x, window.innerWidth - width - 6))}px`;
