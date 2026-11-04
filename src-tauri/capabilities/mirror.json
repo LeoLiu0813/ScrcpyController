@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "mirror",
+  "description": "Window controls for the mirror shell",
+  "windows": ["mirror-*"],
+  "permissions": [
+    "core:default", "core:window:allow-set-title", "core:window:allow-start-dragging", "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize", "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-close", "core:window:allow-set-fullscreen",
+    "core:window:allow-set-always-on-top", "core:window:allow-set-size",
+    "core:window:allow-set-position", "core:window:allow-unminimize"
+  ]
+}

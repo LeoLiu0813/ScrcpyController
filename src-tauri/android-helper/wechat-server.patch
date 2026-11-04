@@ -1,0 +1,216 @@
+diff --git a/server/src/main/java/com/genymobile/scrcpy/WechatDisplayInsets.java b/server/src/main/java/com/genymobile/scrcpy/WechatDisplayInsets.java
+new file mode 100644
+index 0000000..93bc092
+--- /dev/null
++++ b/server/src/main/java/com/genymobile/scrcpy/WechatDisplayInsets.java
+@@ -0,0 +1,149 @@
++package com.genymobile.scrcpy;
++
++import com.genymobile.scrcpy.util.Ln;
++
++import android.content.Context;
++import android.graphics.Color;
++import android.graphics.Insets;
++import android.graphics.PixelFormat;
++import android.graphics.Rect;
++import android.hardware.display.DisplayManager;
++import android.hardware.display.VirtualDisplay;
++import android.os.Binder;
++import android.os.Build;
++import android.os.Handler;
++import android.os.Looper;
++import android.view.Display;
++import android.view.DisplayCutout;
++import android.view.Gravity;
++import android.view.Surface;
++import android.view.View;
++import android.view.WindowInsets;
++import android.view.WindowManager;
++
++import java.lang.reflect.Array;
++import java.util.Collections;
++import java.util.concurrent.FutureTask;
++import java.util.concurrent.TimeUnit;
++
++/** Supplies the phone's top safe area to the fixed portrait WeChat display. */
++public final class WechatDisplayInsets {
++    private final Context shell;
++    private final boolean cutout;
++    private final int top;
++    private WindowManager windowManager;
++    private View insetView;
++
++    private WechatDisplayInsets(Context shell, boolean cutout, int top) {
++        this.shell = shell;
++        this.cutout = cutout;
++        this.top = top;
++    }
++
++    public static WechatDisplayInsets read(int width, int height, int dpi, boolean flexible) throws Exception {
++        if (flexible || width >= height) {
++            return null;
++        }
++        boolean cutout = Build.VERSION.SDK_INT == 36 && "xiaomi".equalsIgnoreCase(Build.MANUFACTURER);
++        boolean statusBar = Build.VERSION.SDK_INT == 34 && "oneplus".equalsIgnoreCase(Build.MANUFACTURER);
++        if (!cutout && !statusBar) {
++            return null;
++        }
++
++        Context shell = Workarounds.getSystemContext().createPackageContext("com.android.shell", Context.CONTEXT_IGNORE_SECURITY);
++        Display primary = shell.getSystemService(DisplayManager.class).getDisplay(Display.DEFAULT_DISPLAY);
++        Context primaryContext = shell.createDisplayContext(primary);
++        int primaryDpi = primaryContext.getResources().getDisplayMetrics().densityDpi;
++        DisplayCutout primaryCutout = primary.getCutout();
++        int top = primaryCutout == null ? 0 : primaryCutout.getSafeInsetTop();
++        if (statusBar) {
++            Context windowContext = primaryContext.createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null);
++            WindowInsets insets = windowContext.getSystemService(WindowManager.class)
++                    .getMaximumWindowMetrics().getWindowInsets();
++            top = Math.max(top, insets.getInsetsIgnoringVisibility(WindowInsets.Type.statusBars()).top);
++        }
++        int scaledTop = primaryDpi > 0 ? Math.round(top * (float) dpi / primaryDpi) : 0;
++        if (scaledTop <= 0 || scaledTop >= height / 4) {
++            Ln.w("WeChat top inset unavailable for the current display configuration");
++            return null;
++        }
++        return new WechatDisplayInsets(shell, cutout, scaledTop);
++    }
++
++    public VirtualDisplay createCutoutDisplay(int width, int height, int dpi, Surface surface, int flags) throws Exception {
++        if (!cutout) {
++            return null;
++        }
++        Class<?> configClass = Class.forName("android.hardware.display.VirtualDisplayConfig");
++        Class<?> builderClass = Class.forName("android.hardware.display.VirtualDisplayConfig$Builder");
++        Object builder = builderClass.getConstructor(String.class, int.class, int.class, int.class)
++                .newInstance("scrcpy", width, height, dpi);
++        DisplayCutout safeArea = new DisplayCutout(new Rect(0, top, 0, 0),
++                Collections.singletonList(new Rect(0, 0, width, top)));
++        builderClass.getMethod("setDisplayCutout", DisplayCutout.class).invoke(builder, safeArea);
++        builderClass.getMethod("setFlags", int.class).invoke(builder, flags);
++        builderClass.getMethod("setSurface", Surface.class).invoke(builder, surface);
++        Object config = builderClass.getMethod("build").invoke(builder);
++        VirtualDisplay display = (VirtualDisplay) DisplayManager.class
++                .getMethod("createVirtualDisplay", configClass, Handler.class, VirtualDisplay.Callback.class)
++                .invoke(shell.getSystemService(DisplayManager.class), config, new Handler(Looper.getMainLooper()), null);
++        if (display == null) {
++            throw new IllegalStateException("Could not create WeChat cutout display");
++        }
++        Ln.i("WeChat cutout inset: " + top);
++        return display;
++    }
++
++    public void installStatusBar(Display display) throws Exception {
++        if (cutout) {
++            return;
++        }
++        FutureTask<Void> install = new FutureTask<>(() -> {
++            Context context = shell.createWindowContext(display, WindowManager.LayoutParams.TYPE_STATUS_BAR, null);
++            WindowManager manager = context.getSystemService(WindowManager.class);
++            View view = new View(context);
++            view.setBackgroundColor(Color.TRANSPARENT);
++            WindowManager.LayoutParams params = new WindowManager.LayoutParams(-1, top,
++                    WindowManager.LayoutParams.TYPE_STATUS_BAR,
++                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
++                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT);
++            params.token = new Binder();
++            params.packageName = "com.android.shell";
++            params.gravity = Gravity.TOP;
++            params.setTitle("scrcpy WeChat top inset");
++            params.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
++            params.setFitInsetsTypes(0);
++            Class<?> providerClass = Class.forName("android.view.InsetsFrameProvider");
++            Object provider = providerClass.getConstructor(Object.class, int.class, int.class)
++                    .newInstance(new Binder(), 0, WindowInsets.Type.statusBars());
++            providerClass.getMethod("setSource", int.class).invoke(provider, 0);
++            providerClass.getMethod("setInsetsSize", Insets.class).invoke(provider, Insets.of(0, top, 0, 0));
++            Object providers = Array.newInstance(providerClass, 1);
++            Array.set(providers, 0, provider);
++            WindowManager.LayoutParams.class.getField("providedInsets").set(params, providers);
++            manager.addView(view, params);
++            windowManager = manager;
++            insetView = view;
++            return null;
++        });
++        Handler handler = new Handler(Looper.getMainLooper());
++        handler.post(install);
++        try {
++            install.get(3, TimeUnit.SECONDS);
++            Ln.i("WeChat status bar inset: " + top);
++        } finally {
++            install.cancel(false);
++        }
++    }
++
++    public void release() {
++        // Display destruction also removes the source if the main looper has already stopped.
++        new Handler(Looper.getMainLooper()).post(() -> {
++            if (insetView != null && insetView.isAttachedToWindow()) {
++                windowManager.removeViewImmediate(insetView);
++            }
++            insetView = null;
++            windowManager = null;
++        });
++    }
++}
+diff --git a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+index 5ed4c73..9228048 100644
+--- a/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
++++ b/server/src/main/java/com/genymobile/scrcpy/video/NewDisplayCapture.java
+@@ -2,6 +2,7 @@ package com.genymobile.scrcpy.video;
+ 
+ import com.genymobile.scrcpy.AndroidVersions;
+ import com.genymobile.scrcpy.Options;
++import com.genymobile.scrcpy.WechatDisplayInsets;
+ import com.genymobile.scrcpy.control.PositionMapper;
+ import com.genymobile.scrcpy.display.DisplayInfo;
+ import com.genymobile.scrcpy.display.DisplayMonitor;
+@@ -65,6 +66,7 @@ public class NewDisplayCapture extends SurfaceCapture {
+     private VideoConstraints videoConstraints;
+ 
+     private VirtualDisplay virtualDisplay;
++    private WechatDisplayInsets wechatInsets;
+     private Size videoSize;
+     private Size displaySize; // the logical size of the display (including rotation)
+     private Size physicalSize; // the physical size of the display (without rotation)
+@@ -231,8 +233,28 @@ public class NewDisplayCapture extends SurfaceCapture {
+                             | VIRTUAL_DISPLAY_FLAG_DEVICE_DISPLAY_GROUP;
+                 }
+             }
+-            VirtualDisplay vd = ServiceManager.getDisplayManager()
+-                    .createNewVirtualDisplay("scrcpy", displaySize.getWidth(), displaySize.getHeight(), dpi, surface, flags);
++            int width = displaySize.getWidth();
++            int height = displaySize.getHeight();
++            VirtualDisplay vd = null;
++            try {
++                wechatInsets = WechatDisplayInsets.read(width, height, dpi, flexDisplay);
++                if (wechatInsets != null) {
++                    vd = wechatInsets.createCutoutDisplay(width, height, dpi, surface, flags);
++                }
++            } catch (Exception e) {
++                Ln.w("Could not configure WeChat top inset", e);
++                wechatInsets = null;
++            }
++            if (vd == null) {
++                vd = ServiceManager.getDisplayManager().createNewVirtualDisplay("scrcpy", width, height, dpi, surface, flags);
++            }
++            if (wechatInsets != null) {
++                try {
++                    wechatInsets.installStatusBar(vd.getDisplay());
++                } catch (Exception e) {
++                    Ln.w("Could not install WeChat status bar inset", e);
++                }
++            }
+             setCurrentVirtualDisplay(vd); // used for client resize
+             int virtualDisplayId = vd.getDisplay().getDisplayId();
+             Ln.i("New display: " + displaySize.getWidth() + "x" + displaySize.getHeight() + "/" + dpi + " (id=" + virtualDisplayId + ")");
+@@ -294,6 +316,9 @@ public class NewDisplayCapture extends SurfaceCapture {
+ 
+     @Override
+     public void release() {
++        if (wechatInsets != null) {
++            wechatInsets.release();
++        }
+         displayMonitor.stopAndRelease();
+ 
+         if (debouncer != null) {

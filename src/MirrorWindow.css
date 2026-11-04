@@ -1,0 +1,93 @@
+.mirror-shell {
+  position: fixed; inset: 0 var(--mirror-panel-width, 0px) 0 0; display: flex; flex-direction: column; min-width: 0;
+  background: transparent;
+  border-radius: 9px; overflow: hidden;
+}
+.mirror-shell.is-fullscreen { border-radius: 0; background: #000; }
+.mirror-titlebar {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr) auto;
+  align-items: center; gap: 6px; flex: 0 0 36px; padding: 0 4px 0 11px; font-size: 13px; min-width: 0;
+}
+.mirror-titlebar > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Keep text in the title strip, outside the native video surface. */
+.mirror-titlebar .mirror-caption, .mirror-fullscreen-tips > span {
+  color: #d8d4e0; font-size: 12px; text-align: center;
+}
+.mirror-fullscreen-tips {
+  display: flex; justify-content: center; align-items: center; flex: 0 0 28px;
+}
+.mirror-titlebar, .mirror-side {
+  background: color-mix(in srgb, #20212b var(--mirror-opacity), transparent);
+}
+.mirror-caption-actions { display: flex; margin-left: auto; }
+.mirror-caption-actions .icon-button { min-width: 29px; height: 27px; border: 1px solid transparent; }
+.mirror-caption-actions { gap: 2px; }
+.mirror-caption-actions .icon-button svg { width: 15px; height: 15px; }
+.mirror-caption-actions .icon-button:last-child:hover { background: #723c4b; }
+.mirror-body { display: flex; min-width: 0; min-height: 0; flex: 1; }
+.mirror-video {
+  flex: 1; min-width: 0; min-height: 0; display: flex;
+  padding: var(--mirror-background-inset);
+  background: color-mix(in srgb, #20212b var(--mirror-opacity), transparent);
+}
+/* Keep the embedded video away from the transparent host's clipped edges. */
+.mirror-shell:not(.is-fullscreen) .mirror-video {
+  padding-left: var(--mirror-edge-inset);
+  padding-bottom: var(--mirror-edge-inset);
+}
+.mirror-video-viewport { position: relative; flex: 1; min-width: 0; min-height: 0; }
+.mirror-side { display: flex; flex: none; min-height: 0; }
+.mirror-toolbar {
+  width: var(--mirror-rail-width); flex: none; display: flex; flex-direction: column; align-items: center;
+  padding: 7px 6px; gap: 7px; min-height: 0;
+}
+.mirror-list { flex: 1; overflow: auto; width: 100%; scrollbar-width: none; min-height: 18px; }
+.mirror-tile { position: relative; display: flex; justify-content: center; padding: 2px 0; }
+.mirror-tile.mirror-divider { border-top: 1px solid #ffffff25; margin-top: 5px; padding-top: 7px; }
+.mirror-tile .icon-button { touch-action: none; }
+.mirror-tile .icon-button[data-dragging] { opacity: .45; }
+.mirror-list, .mirror-more { position: relative; }
+.mirror-tile.insert-before::before, .mirror-tile.insert-after::after, .mirror-list.insert-after::after {
+  content: ""; position: absolute; z-index: 1; height: 2px; inset-inline: 0; background: #bb9af7; pointer-events: none;
+}
+.mirror-tile.insert-before::before { top: 0; }
+.mirror-tile.insert-after::after, .mirror-list.insert-after::after { bottom: 0; }
+.mirror-more {
+  flex: none; overflow: auto; background: color-mix(in srgb, #20212b var(--mirror-opacity), transparent);
+}
+.mirror-more { width: 58px; padding: 7px 4px; scrollbar-width: none; border-left: 1px solid #ffffff18; }
+.mirror-more .icon-button { justify-content: center; }
+.mirror-reveal { flex: 0 0 4px; }
+.mirror-error { position: fixed; bottom: 6px; right: 5px; width: 180px; padding: 8px; background: #372531; font-size: 12px; cursor: pointer; }
+
+.mirror-more-outside {
+  position: fixed; right: 0; top: 36px; bottom: 0; width: 58px;
+  border: 0; border-radius: 9px;
+}
+
+
+.mirror-shell .icon-button, .mirror-more-outside .icon-button {
+  background: color-mix(in srgb, var(--mirror-button-color) var(--mirror-button-opacity), transparent);
+}
+.mirror-shell .icon-button:hover:not(:disabled), .mirror-more-outside .icon-button:hover:not(:disabled) {
+  border-color: #a782d999; color: #e5d6ff;
+}
+.mirror-shell .mirror-pin[aria-pressed=true] {
+  background: #513c6a; border-color: #bc9dea; color: #f1dfff;
+}
+.mirror-shell .mirror-pin[aria-pressed=true] svg { fill: #b99ade66; }
+.mirror-apps {
+  display: flex; flex: 0 1 auto; flex-direction: column; align-items: center; gap: 4px;
+  min-height: 43px; max-height: 34%; width: 100%; padding-top: 6px;
+  border-top: 1px solid #ffffff25; overflow-y: auto; scrollbar-width: none;
+}
+.mirror-apps .mirror-app { flex: 0 0 34px; width: 34px; height: 34px; min-width: 34px; padding: 4px; }
+.mirror-apps img { width: 100%; height: 100%; object-fit: contain; border-radius: 5px; }
+.mirror-empty-menu { display: grid; place-items: center; min-height: 36px; }
+.mirror-empty-menu svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.65; }
+.mirror-color-input { width: 55px; cursor: pointer; }
+
+
+.mirror-device-title { display: flex; min-width: 0; align-items: center; gap: 7px; }
+.mirror-device-title > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.mirror-fps { flex: none; color: #bbb8ca; font-size: 10px; font-variant-numeric: tabular-nums; }

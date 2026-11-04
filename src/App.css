@@ -1,7 +1,181 @@
 * { box-sizing: border-box; }
-body { margin: 0; background: #101623; color: #e8eefb; font-family: system-ui, sans-serif; }
-main { max-width: 70rem; margin: auto; padding: 2rem; }
-header { display: flex; flex-wrap: wrap; gap: 1rem; justify-content: space-between; align-items: center; }
-label { display: flex; gap: .6rem; align-items: center; }
-select { font: inherit; color: inherit; background: #273d5d; padding: .4rem; border: 1px solid #7184a5; border-radius: .3rem; }
-section { margin-top: 1.5rem; background: #192235; padding: 1.25rem; border-radius: .75rem; }
+:root { color-scheme: dark; font-family: system-ui, "Microsoft YaHei UI", sans-serif; color: #ececf2; --control-height: 36px; --field-gap: 12px; --section-padding: 16px; }
+body { margin: 0; }
+.app { display: grid; grid-template-columns: 58px minmax(0, 1fr); }
+.app.expanded { grid-template-columns: 166px minmax(0, 1fr); }
+.rail { display: flex; flex-direction: column; align-items: stretch; gap: 10px; padding: 12px 9px; background: #20212b; border-right: 1px solid #363743; }
+.rail-spacer { flex: 1; }
+main { min-width: 0; padding: 23px 26px; }
+header, .device, .setting { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+header { margin-bottom: 20px; }
+h1 { margin: 0; font-size: 26px; }
+p { margin: 7px 0; color: #a5a6ba; }
+.panel { border: 1px solid #363743; border-radius: 8px; background: #20212b; }
+.devices { list-style: none; padding: 0; margin: 0; }
+.device { padding: 13px 15px; }
+.device + .device { border-top: 1px solid #363743; }
+.device:hover { background: #262731; }
+.device-details { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.device-details small { display: block; color: #a5a6ba; margin-top: 4px; }
+.actions { display: flex; gap: 7px; }
+.status { color: #a5a6ba; font-size: 13px; }
+.status.online { color: #a9d5b8; }
+.empty, .setting { padding: 16px; }
+.hidden-device-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; margin-bottom: 8px; }
+.notice { color: #ee8989; margin-bottom: 12px; }
+select, .icon-button { font: inherit; color: inherit; background: #2a2b36; border: 1px solid #363743; border-radius: 6px; }
+select { padding: 6px 10px; }
+select, input:not([type=checkbox], [type=range]), button:not(.icon-button) { min-height: var(--control-height); min-width: 0; }
+.icon-button { position: relative; display: inline-flex; align-items: center; justify-content: center; min-width: var(--control-height); height: var(--control-height); padding: 0 7px; cursor: pointer; gap: 8px; }
+.expanded .rail .icon-button { justify-content: flex-start; }
+.icon-button svg { width: 19px; height: 19px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+.icon-button:hover:not(:disabled), .icon-button[aria-pressed=true] { background: #3c344e; color: #e5d6ff; }
+.icon-button:disabled { opacity: .45; cursor: default; }
+:focus-visible { outline: 2px solid #bb9af7; outline-offset: 2px; }
+.status.failure { color: #ee8989; }
+.controls { padding: var(--section-padding); margin-bottom: var(--field-gap); }
+.controls h2 { margin: 0 0 12px; font-size: 17px; }
+.controls summary { cursor: pointer; }
+.controls[open] summary { margin-bottom: 14px; }
+.field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 155px), 1fr)); gap: var(--field-gap); }
+.field { display: grid; gap: 5px; min-width: 0; color: #d8d8e4; }
+.field :is(input, select) { width: 100%; }
+.checks, .tool-row, .rename-form { display: flex; flex-wrap: wrap; align-items: end; gap: var(--field-gap); }
+.checks { margin-top: 12px; }
+.check { display: inline-flex; align-items: center; gap: 5px; }
+.check input { accent-color: #bb9af7; }
+.tool-row .field { flex: 1 1 160px; }
+.tool-row .duration { flex: 0 1 120px; }
+.rename-form input { flex: 1; min-width: 115px; }
+.rename-form small { flex-basis: 100%; }
+input:not([type=checkbox]), button:not(.icon-button) { font: inherit; color: inherit; background: #2a2b36; border: 1px solid #363743; border-radius: 6px; padding: 6px 10px; }
+button:not(.icon-button):hover:not(:disabled) { background: #3c344e; }
+button:not(.icon-button):disabled { opacity: .45; }
+pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 265px; overflow: auto; }
+.capture { overflow-wrap: anywhere; }
+.app-display-options { margin-top: var(--field-gap); grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid #363743; }
+button.primary-action:not(.icon-button) { background: #48375e; border-color: #70588f; color: #f1e7ff; }
+button.primary-action:not(.icon-button):hover:not(:disabled) { background: #5a4476; }
+.phone-app-combobox { position: relative; }
+.phone-app-combobox input:not([readonly]) { padding-right: 39px; }
+.phone-app-toggle.icon-button { position: absolute; inset: 0 1px 0 auto; min-width: 34px; height: 100%; border: 0; background: transparent; }
+.phone-app-results { position: absolute; z-index: 3; inset: calc(100% + 4px) 0 auto; max-height: min(190px, 42vh); overflow: auto; background: #262731; border: 1px solid #575869; border-radius: 7px; box-shadow: 0 6px 16px #10101590; }
+.phone-app-results ul { list-style: none; margin: 0; padding: 4px; }
+.phone-app-results li { display: grid; gap: 2px; padding: 6px 9px; border-radius: 4px; cursor: pointer; overflow-wrap: anywhere; }
+.phone-app-results li:is(:hover, .active, [aria-selected=true]) { background: #3c344e; }
+.phone-app-results small { color: #b4b5c8; }
+.phone-app-results p { margin: 0; padding: 8px 10px; }
+:root { background: transparent; }
+body { overflow: hidden; }
+.window-shell { height: 100vh; display: flex; flex-direction: column; background: color-mix(in srgb, #17171f var(--window-opacity), transparent); }
+.titlebar { height: 41px; flex: 0 0 41px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px 0 16px; font-size: 14px; user-select: none; }
+.title-brand { display: flex; align-items: center; gap: 6px; }
+.title-brand img { width: 22px; height: 22px; pointer-events: none; }
+.title-actions { display: flex; gap: 4px; }
+.title-actions .icon-button { height: 27px; min-width: 32px; border: 0; background: transparent; }
+.title-actions .icon-button:last-child:hover { background: #a43e4d; }
+.title-actions .icon-button svg { width: 16px; height: 16px; }
+.app { flex: 1; min-height: 0; padding: 0 8px 8px; gap: 8px; }
+.rail, main { min-height: 0; border: 1px solid #575869; border-radius: 9px; background: color-mix(in srgb, #20212b var(--panel-opacity), transparent); }
+.rail { position: relative; z-index: 2; }
+main { overflow-y: auto; }
+.rail-devices { border-top: 1px solid #575869; padding-top: 10px; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.phone-choice { padding: 0 4px; min-width: 0; }
+.phone-choice.phone-offline .device-mark { opacity: .65; }
+.phone-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.device-mark { display: inline-grid; place-items: center; position: relative; width: 29px; height: 29px; flex: 0 0 29px; color: #e5d6ff; }
+.device-mark svg, .brand-symbol { width: 19px; height: 19px; }
+.device-mark svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linejoin: round; }
+.brand-symbol { background: currentColor; mask: var(--brand) center/contain no-repeat; }
+.brand-oneplus { --brand: url("/brands/oneplus.svg"); color: #ff7782; }
+.brand-xiaomi { --brand: url("/brands/xiaomi.svg"); color: #ffa66e; }
+.brand-google { --brand: url("/brands/google.svg"); color: #9fc3ff; }
+.brand-samsung { --brand: url("/brands/samsung.svg"); color: #a7b8ff; }
+.device-badge { position: absolute; right: -3px; bottom: -2px; min-width: 14px; padding: 0 3px; border-radius: 7px; border: 1px solid #3c344e; background: #bb9af7; color: #21182d; font-size: 10px; font-weight: 700; line-height: 12px; text-align: center; }
+.device.dragging { opacity: .55; }
+.drag-handle { color: #a5a6ba; cursor: grab; user-select: none; }
+.appearance { display: grid; gap: var(--field-gap); margin-top: var(--field-gap); }
+.appearance h2 { margin: 0; }
+.appearance input[type=range] { padding: 0; accent-color: #bb9af7; }
+.appearance .icon-button { justify-self: start; }
+.rename-form label { flex: 1 1 125px; }
+.profile-hint { margin-bottom: 12px; }
+.resize-edge { position: absolute; z-index: 5; }
+.resize-North,.resize-South { height: 5px; left: 8px; right: 8px; cursor: ns-resize; }
+.resize-East,.resize-West { width: 5px; top: 8px; bottom: 8px; cursor: ew-resize; }
+.resize-North,.resize-NorthWest,.resize-NorthEast { top: 0; }
+.resize-South,.resize-SouthWest,.resize-SouthEast { bottom: 0; }
+.resize-West,.resize-NorthWest,.resize-SouthWest { left: 0; }
+.resize-East,.resize-NorthEast,.resize-SouthEast { right: 0; }
+.resize-NorthWest,.resize-NorthEast,.resize-SouthWest,.resize-SouthEast { width: 8px; height: 8px; }
+.resize-NorthWest,.resize-SouthEast { cursor: nwse-resize; }
+.resize-NorthEast,.resize-SouthWest { cursor: nesw-resize; }
+.rail > .icon-button, .phone-picker > .icon-button { display: grid; grid-template-columns: 28px minmax(0, 1fr); justify-content: start; padding: 0 4px; gap: 8px; text-align: left; }
+.rail > .icon-button > svg { justify-self: center; }
+.rail > .icon-button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.phone-picker { position: relative; }
+.phone-picker > .icon-button { width: 100%; }
+.phone-picker > .icon-button > .device-mark { justify-self: center; }
+.phone-popover { position: absolute; bottom: 0; left: calc(100% + 8px); z-index: 10; width: min(270px, 55vw); max-height: 55vh; overflow-y: auto; padding: 7px; background: #20212b; }
+.phone-popover .phone-choice { display: flex; width: 100%; justify-content: flex-start; gap: 10px; padding: 6px 9px; height: auto; min-height: 41px; text-align: left; }
+.phone-popover .phone-choice + .phone-choice { margin-top: 5px; }
+.phone-popover small { display: block; font-size: 11px; color: #a5a6ba; }
+.drag-handle { display: grid; place-items: center; width: 22px; height: 34px; flex: 0 0 22px; touch-action: none; }
+.shortcut-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.shortcut-editor { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(570px, calc(100vw - 44px)); max-height: calc(100vh - 54px); overflow: auto; z-index: 12; background: #20212b; box-shadow: 0 0 0 100vmax #101015a8; }
+.device.drop-before, .device.drop-after { background: #3c344e; }
+.device.drop-before { box-shadow: inset 0 3px #bb9af7; }
+.device.drop-after { box-shadow: inset 0 -3px #bb9af7; }
+.device.dragging .drag-handle { cursor: grabbing; color: #e5d6ff; }
+.app-grid { align-items: flex-start; }
+.shortcut-tile { position: relative; }
+.app-grid .shortcut { width: 35px; padding: 0; }
+.app-grid .shortcut-tile > .shortcut { border: 0; background: transparent; }
+.app-grid .shortcut img { width: 100%; height: 100%; object-fit: contain; }
+.app-grid .shortcut-tile > .shortcut svg { fill: #bb9af7; stroke: none; }
+.shortcut-menu { position: absolute; z-index: 4; left: 0; top: calc(100% + 5px); min-width: 90px; padding: 5px; background: #20212b; }
+.shortcut-menu button { display: block; width: 100%; text-align: left; }
+.shortcut-menu button + button { margin-top: 4px; }
+.app-grid .shortcut-add { color: #bb9af7; }
+.connection-dialog { width: min(480px, calc(100vw - 32px)); padding: 18px; background: #20212b; color: #ececf2; }
+.connection-dialog::backdrop { background: #101015a8; }
+.connection-modes { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 14px; }
+.connection-modes button[aria-pressed=true] { background: #3c344e; color: #e5d6ff; }
+.connection-dialog form > .field + .field { margin-top: 10px; }
+.error-toast {
+  position: fixed; top: 48px; right: 18px; z-index: 30;
+  display: flex; align-items: center; gap: 10px;
+  max-width: min(410px, calc(100vw - 36px)); padding: 9px 11px 9px 13px;
+  border: 1px solid #714853; border-radius: 8px;
+  color: #f3dce2; background: #31242d;
+  box-shadow: 0 5px 18px #0b090b55;
+}
+.error-toast span { overflow-wrap: anywhere; }
+.error-toast .icon-button { flex: none; width: 28px; min-width: 28px; height: 28px; padding: 0; background: transparent; }
+.error-toast .icon-button svg { width: 15px; height: 15px; }
+.selection-count { margin-right: auto; padding: 6px 9px; border-radius: 6px; background: #20212b; }
+.device > input[type=checkbox] { width: 18px; height: 18px; flex: 0 0 18px; accent-color: #bb9af7; }
+.device-settings { display: flex; flex-direction: column; width: min(660px, calc(100vw - 44px)); overflow: hidden; }
+.device-settings .device-settings-header { flex: none; margin: 0; padding: 12px 15px; border-bottom: 1px solid #363743; }
+.device-settings-header h2 { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
+.device-settings-header .actions { flex: none; }
+.device-settings-body { min-height: 0; overflow: auto; padding: 15px; }
+.delete-dialog .danger-button { color: #ffdbe1; border-color: #714853; }
+.restore-devices { margin-top: 14px; }
+.restore-devices > div { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 7px; }
+
+.device-page { display: flex; flex-direction: column; overflow: hidden; padding: 0; }
+.device-page > .page-content { flex: 1; min-height: 0; overflow: auto; padding: 23px 26px; }
+.device-page-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 7px; padding: 10px 26px; border-top: 1px solid #575869; }
+@media (max-width: 620px) {
+  main, .device-page > .page-content { padding: 14px; }
+  .device-page { padding: 0; }
+  .device-page-actions { padding-inline: 14px; }
+  .device { flex-wrap: wrap; gap: 8px; padding: 10px; }
+  .device > .actions { flex: 1 0 100%; justify-content: flex-end; flex-wrap: wrap; }
+}
+@media (max-width: 400px) {
+  .app-display-options { grid-template-columns: minmax(0, 1fr); }
+}
+.tooltip { position: fixed; inset: auto; margin: 0; max-width: min(340px, calc(100vw - 12px)); padding: 4px 8px; border: 1px solid #575869; border-radius: 5px; background: #30313e; color: #ececf2; font-size: 13px; overflow-wrap: anywhere; pointer-events: none; }

@@ -1,0 +1,160 @@
+# scrcpy（官方投屏引擎）5.0.1 参数覆盖清单
+
+从本机已校验的官方 5.0.1 Windows（微软桌面系统）发行包帮助输出提取，共 109 个长选项。每个选项归入一处。此清单描述**计划入口**，功能实现与实机验收仍需逐项记录。它与[第三版方案](./README.md)配套。
+
+覆盖分为图形控件、受控高级参数、应用管理以及平台不适用。官方模式追求覆盖所有适用功能。增强模式首期只承诺独立画面、触控和截图，其余从官方模式使用。设备、系统版本和编码器可能限制部分参数。
+
+- 常用控件优先覆盖画质、帧率、音频、录像、熄屏、置顶、剪贴板、窗口尺寸、画面来源、键鼠和手柄模式。
+- 设备选择选项由设备列表生成。高级连接用于显式选择已授权的目标和隧道，仅接受与当前会话一致的配置。
+- 进程生命周期相关开关受控。关闭共享调试桥、保留手机端临时文件等诊断行为在界面显示约束，避免影响其他手机或会话。
+- 后台录像、仅声音、仅控制是组合预设。官方工具的查询、帮助和版本使用一次性命令。无调试键鼠模式单独运行，提示无投屏。
+- 文件拖放、剪贴板和窗口内快捷键由上游客户端直接提供。增强工具条只展示已实现的动作。实时运行操作与启动参数分别验收。
+- 平台不适用项保留在目录中并注明原因。升级后重新抓取帮助输出，审查新增、移除、改名和默认值变化。
+
+## 连接 · 设备页或高级连接
+
+- `--force-adb-forward`（强制调试桥正向隧道）
+- `--port`（连接端口）
+- `--select-tcpip`（选择网络设备）
+- `--select-usb`（选择有线设备）
+- `--serial`（目标设备序列号）
+- `--tcpip`（网络连接模式）
+- `--tunnel-host`（调试隧道地址）
+- `--tunnel-port`（调试隧道端口）
+
+## 画面来源 · 投屏配置
+
+- `--camera-ar`（摄像头宽高比）
+- `--camera-facing`（摄像头朝向）
+- `--camera-fps`（摄像头帧率）
+- `--camera-high-speed`（摄像头高速模式）
+- `--camera-id`（摄像头编号）
+- `--camera-size`（摄像头尺寸）
+- `--camera-torch`（摄像头补光灯）
+- `--camera-zoom`（摄像头缩放）
+- `--display-id`（显示器编号）
+- `--flex-display`（随窗口调整虚拟屏）
+- `--new-display`（创建虚拟屏）
+- `--no-vd-destroy-content`（关闭虚拟屏时保留内容）
+- `--no-vd-system-decorations`（隐藏虚拟屏系统装饰）
+- `--start-app`（启动手机应用）
+- `--video-source`（视频来源）
+
+## 视频 · 投屏配置
+
+- `--angle`（任意角度旋转）
+- `--capture-orientation`（采集方向）
+- `--crop`（裁剪）
+- `--display-orientation`（投屏显示方向）
+- `--hwdec`（硬件解码）
+- `--ignore-video-encoder-constraints`（忽略视频编码器限制）
+- `--max-fps`（最大帧率）
+- `--max-size`（最大画面边长）
+- `--min-size-alignment`（最小尺寸对齐）
+- `--no-downsize-on-error`（编码错误时禁止降尺寸）
+- `--no-mipmaps`（禁用多级纹理）
+- `--orientation`（采集与显示方向）
+- `--print-fps`（输出帧率）
+- `--render-driver`（渲染驱动）
+- `--render-fit`（画面适配方式）
+- `--video-bit-rate`（视频码率）
+- `--video-buffer`（视频缓冲）
+- `--video-codec`（视频编码格式）
+- `--video-codec-options`（视频编码参数）
+- `--video-encoder`（视频编码器）
+
+## 音频 · 投屏配置
+
+- `--audio-bit-rate`（音频码率）
+- `--audio-buffer`（音频缓冲）
+- `--audio-codec`（音频编码格式）
+- `--audio-codec-options`（音频编码参数）
+- `--audio-dup`（同时在手机播放声音）
+- `--audio-encoder`（音频编码器）
+- `--audio-output-buffer`（音频输出缓冲）
+- `--audio-source`（音频来源）
+- `--no-audio`（禁用音频）
+- `--no-audio-playback`（禁用声音播放）
+- `--require-audio`（音频失败则停止）
+
+## 窗口、播放与录像 · 投屏配置或工具
+
+- `--always-on-top`（窗口置顶）
+- `--background-color`（窗口背景色）
+- `--disable-screensaver`（禁用电脑屏保）
+- `--fullscreen`（全屏）
+- `--no-playback`（禁用播放）
+- `--no-video`（禁用视频）
+- `--no-video-playback`（禁用视频播放）
+- `--no-window`（不创建窗口）
+- `--no-window-aspect-ratio-lock`（解除窗口比例锁定）
+- `--record`（保存录像）
+- `--record-format`（录像格式）
+- `--record-orientation`（录像方向）
+- `--time-limit`（会话时限）
+- `--window-borderless`（无边框窗口）
+- `--window-height`（窗口初始高度）
+- `--window-title`（窗口标题）
+- `--window-width`（窗口初始宽度）
+- `--window-x`（窗口初始横坐标）
+- `--window-y`（窗口初始纵坐标）
+
+## 输入与手机状态 · 投屏配置
+
+- `--display-ime-policy`（输入法显示策略）
+- `--gamepad`（手柄模式）
+- `--keep-active`（保持设备活跃）
+- `--keyboard`（键盘模式）
+- `--legacy-paste`（旧式粘贴）
+- `--mouse`（鼠标模式）
+- `--mouse-bind`（鼠标按键绑定）
+- `--no-clipboard-autosync`（关闭剪贴板自动同步）
+- `--no-control`（禁用控制）
+- `--no-key-repeat`（禁用按键重复）
+- `--no-mouse-hover`（禁用鼠标悬停）
+- `--no-power-on`（启动时不唤醒）
+- `--power-off-on-close`（关闭会话时关手机屏幕）
+- `--prefer-text`（优先文本输入）
+- `--push-target`（文件推送位置）
+- `--raw-key-events`（原始按键事件）
+- `--screen-off-timeout`（手机熄屏超时）
+- `--shortcut-mod`（快捷键修饰键）
+- `--show-touches`（显示触点）
+- `--stay-awake`（保持唤醒）
+- `--turn-screen-off`（开始投屏时熄屏）
+
+## 独立命令 · 工具或设置
+
+- `--help`（使用帮助）
+- `--list-apps`（枚举应用）
+- `--list-camera-sizes`（枚举摄像头尺寸）
+- `--list-cameras`（枚举摄像头）
+- `--list-displays`（枚举显示器）
+- `--list-encoders`（枚举编码器）
+- `--otg`（无调试键鼠模式）
+- `--version`（显示版本）
+
+## 诊断 · 工具或受控高级参数
+
+- `--kill-adb-on-close`（关闭时终止共享调试桥）
+- `--no-cleanup`（保留临时状态）
+- `--no-terminal-title`（不修改终端标题）
+- `--pause-on-exit`（退出时暂停终端）
+- `--verbosity`（日志详细程度）
+
+## 平台不适用
+
+- `--v4l2-buffer`（视频设备缓冲，仅开源桌面系统）
+- `--v4l2-sink`（输出到视频设备，仅开源桌面系统）
+
+[官方功能文档](https://github.com/Genymobile/scrcpy#user-documentation) · [官方 5.0.1 发行](https://github.com/Genymobile/scrcpy/releases/tag/v5.0.1)
+
+## 真机验收 · 2026-11-03
+
+使用本机官方投屏引擎 5.0.1，连接小米 15 Ultra（无线，安卓 16）和一加 9 Pro（有线，安卓 14）。
+
+- **双机并发**。为两路分配独立端口范围后，默认和强制正向连接均同时出画，两路均正常运行至定时退出。控制台已为普通投屏、工具任务和独立应用窗口分配独立范围。并发复测直接使用官方引擎，控制台内的双窗口点击流程待复测。
+- **显示器与编码器**。两机均列出主显示器及硬件编码器。指定主显示器和列出的硬件编码器后成功出画。输入不存在的显示器编号时，引擎会报告具体编号并列出可用显示器。控制台的启动失败提示仍未展示这条诊断。
+- **摄像头与虚拟屏**。两机均枚举出摄像头，后置主摄以 1280×720 出画。设置应用在 720×1280 固定虚拟屏及随窗口模式下均成功启动并出画。本轮确认随窗口模式能启动，实际拖动窗口后的分辨率变化待复测。
+- **录制与声音**。两机录制文件均成功解码出视频帧和音频帧。测试音未录到足以确认的信号，电脑端实际可听播放仍待用手机媒体应用复测。
+- **无线重连**。本轮确认小米经无线投屏。此前已实测无线端口由 44765 变为 38187 后设备页恢复在线，本轮未重复切换手机无线调试。

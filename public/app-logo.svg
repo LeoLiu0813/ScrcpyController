@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="13 15 98 98" role="img" aria-labelledby="title">
+  <title id="title">安卓控制台</title>
+  <defs>
+    <path id="cursor" d="M69 72.2a2.8 2.8 0 0 1 4.5-2.2l16 12.5a2 2 0 0 1-1.2 3.6h-6.2l3.8 7.5a2.2 2.2 0 0 1-.9 3l-2.1 1.1a2.2 2.2 0 0 1-3-.9l-4-7.5-3.5 3.6a2 2 0 0 1-3.4-1.4Z"/>
+    <filter id="cursor-transition" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="0.8"/>
+    </filter>
+  </defs>
+  <rect x="13" y="15" width="98" height="98" rx="22" fill="#19172a"/>
+  <g fill="none" stroke="#c7a8fa">
+    <rect x="41" y="29.5" width="41.5" height="68" rx="10.5" stroke-width="5.4"/>
+    <path d="M56.35 37.4h10.8M53.25 90.2h17" stroke-linecap="round" stroke-width="3.6"/>
+  </g>
+  <use href="#cursor" fill="#19172a" stroke="#19172a" stroke-width="3" stroke-linejoin="round" opacity=".82" filter="url(#cursor-transition)"/>
+  <use href="#cursor" fill="#b48af5"/>
+</svg>
