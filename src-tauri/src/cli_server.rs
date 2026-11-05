@@ -144,6 +144,37 @@ fn read_request(pipe: &mut File) -> io::Result<Request> {
 
 async fn dispatch(app: &AppHandle, request: Request) -> Result<Value, &'static str> {
     match request {
+        Request::Logs { command, limit } => {
+            if command == "show" && limit.is_none() {
+                crate::tray::show(app)?;
+                app.emit_to("main", "open-control-logs", ()).map_err(|_| "controlLogFailed")?;
+                return Ok(json!({ "visible": true }));
+            }
+            tauri::async_runtime::spawn_blocking(move || {
+                let view = match command.as_str() {
+                    "status" if limit.is_none() => crate::control_log::read(0)?,
+                    "tail" if limit.is_none_or(|value| (1..=1000).contains(&value)) => crate::control_log::read(limit.unwrap_or(50))?,
+                    "enable" if limit.is_none() => crate::control_log::set_enabled(true)?,
+                    "disable" if limit.is_none() => crate::control_log::set_enabled(false)?,
+                    "export" if limit.is_none() => {
+                        let path = crate::control_log::export()?;
+                        return Ok(json!({ "path": path }));
+                    },
+                    _ => return Err("invalidArguments"),
+                };
+                let mut value = serde_json::to_value(view).map_err(|_| "controlLogFailed")?;
+                let mut truncated = false;
+                while serde_json::to_vec(&value).map_err(|_| "controlLogFailed")?.len() > MAX_LINE - 1024 {
+                    let Some(entries) = value.get_mut("entries").and_then(Value::as_array_mut).filter(|entries| !entries.is_empty()) else {
+                        return Err("responseTooLarge");
+                    };
+                    entries.remove(0);
+                    truncated = true;
+                }
+                value["truncated"] = json!(truncated);
+                Ok(value)
+            }).await.map_err(|_| "controlLogFailed")?
+        },
         Request::Toolbar {
             serial,
             command,

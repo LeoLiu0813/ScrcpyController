@@ -14,6 +14,10 @@ pub const MAX_LINE: usize = 64 * 1024;
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    Logs {
+        command: String,
+        limit: Option<usize>,
+    },
     Toolbar {
         serial: String,
         command: String,

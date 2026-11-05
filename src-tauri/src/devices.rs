@@ -579,6 +579,35 @@ pub fn mirror_position(window: tauri::WebviewWindow, bounds: crate::mirror::Vide
     crate::mirror::position(&window, &mirror, bounds)
 }
 
+fn logged_action(action: &str) -> &'static str {
+    match action {
+        "back" => "back", "home" => "home", "recents" => "recents",
+        "volumeUp" => "volumeUp", "volumeDown" => "volumeDown", "screenPower" => "screenPower",
+        "screenOff" => "screenOff", "screenOn" => "screenOn", "rotate" => "rotate",
+        "paste" => "paste", "pause" => "pause", "resume" => "resume", "resetVideo" => "resetVideo",
+        "notifications" => "notifications", "quickSettings" => "quickSettings",
+        "screenshot" => "screenshot", "copyScreenshot" => "copyScreenshot",
+        "captureFolder" => "captureFolder", "sendFiles" => "sendFiles",
+        "fullscreen" => "fullscreen", "actual" => "actual", "fit" => "fit", _ => "unknown",
+    }
+}
+
+#[tauri::command]
+pub fn mirror_log_ui(window: tauri::WebviewWindow, event: String, enabled: Option<bool>, action: Option<String>, zone: Option<String>) -> Result<()> {
+    let event = match event.as_str() {
+        "more" => "ui.more_changed", "sidebar" => "ui.sidebar_changed", "fullscreen" => "ui.fullscreen_changed",
+        "drag" => "ui.toolbar_drag", "action" => "ui.action", _ => return Err("invalidArguments"),
+    };
+    let (_, mirror, _) = mirror_session(&window)?;
+    let host = window.hwnd().map_err(|_| "mirrorFrameFailed")?.0 as HWND;
+    let zone = match zone.as_deref() { Some("rail") => Some("rail"), Some("more") => Some("more"), _ => None };
+    crate::control_log::record(event, Some(&crate::mirror::log_session(host)), serde_json::json!({
+        "enabled": enabled, "action": action.as_deref().map(logged_action), "zone": zone,
+        "virtual_screen": mirror.options.virtual_screen,
+    }));
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn mirror_action(window: tauri::WebviewWindow, action: String) -> Result<Option<PathBuf>> {
     let (serial, mirror, target) = mirror_session(&window)?;
@@ -591,7 +620,15 @@ pub async fn mirror_action(window: tauri::WebviewWindow, action: String) -> Resu
     let app = window.app_handle().clone();
     let owner = window.hwnd().map_err(|_| "mirrorFrameFailed")?.0 as usize;
     let virtual_screen = mirror.options.virtual_screen;
-    tauri::async_runtime::spawn_blocking(move || {
+    static NEXT_ACTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let operation = NEXT_ACTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let session = crate::mirror::log_session(owner as HWND);
+    let action_name = logged_action(&action);
+    let started = Instant::now();
+    crate::control_log::record("action.started", Some(&session), serde_json::json!({
+        "operation": operation, "action": action_name, "virtual_screen": virtual_screen,
+    }));
+    let result = tauri::async_runtime::spawn_blocking(move || {
         if action == "sendFiles" && !virtual_screen {
             use tauri::Emitter;
             target.check(&engine(&app)?)?;
@@ -643,7 +680,12 @@ pub async fn mirror_action(window: tauri::WebviewWindow, action: String) -> Resu
         };
         crate::mirror::shortcut(video, shortcut.0, shortcut.1, shortcut.2, shortcut.3)?;
         Ok(None)
-    }).await.map_err(|_| "mirrorActionFailed")?
+    }).await.map_err(|_| "mirrorActionFailed").and_then(|result| result);
+    crate::control_log::record("action.completed", Some(&session), serde_json::json!({
+        "operation": operation, "action": action_name, "duration_ms": started.elapsed().as_millis() as u64,
+        "success": result.is_ok(), "error_code": result.as_ref().err().copied(),
+    }));
+    result
 }
 
 fn mirror_phone_command(path: &std::path::Path, target: &VerifiedTarget, args: &[&str]) -> Result<Option<PathBuf>> {

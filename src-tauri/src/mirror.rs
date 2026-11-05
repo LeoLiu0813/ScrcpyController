@@ -16,7 +16,7 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::{
         ChildWindowFromPointEx, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, GWL_STYLE, GetAncestor, GA_ROOT, GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO, GetParent, GetWindowRect, SetCursorPos, WindowFromPoint, IsChild, IsWindowVisible, IsIconic, GetWindowLongPtrW, HWND_TOP, IsWindow, PostMessageW,
         SW_HIDE, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetParent, SetWindowLongPtrW,
-        SetWindowPos, ShowWindowAsync, WM_APP, WM_CLOSE, WM_DPICHANGED, WM_EXITSIZEMOVE, WM_MOUSEMOVE, WM_MOVE, WM_NCDESTROY, WM_SETFOCUS, WM_SIZE, WM_KEYDOWN, WM_KEYUP, WS_CHILD, WS_POPUP,
+        SetWindowPos, ShowWindowAsync, WM_APP, WM_CLOSE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_MOUSEMOVE, WM_NCDESTROY, WM_SETFOCUS, WM_WINDOWPOSCHANGED, WM_KEYDOWN, WM_KEYUP, WS_CHILD, WS_POPUP,
     },
 };
 
@@ -166,6 +166,59 @@ pub(crate) fn save_placement(shell: &WebviewWindow, mirror: &Mirror) -> Result<(
 }
 
 static NEXT_WINDOW: AtomicU64 = AtomicU64::new(1);
+static NEXT_INPUT_OPERATION: AtomicU64 = AtomicU64::new(1);
+static LOG_SESSIONS: Mutex<BTreeMap<usize, String>> = Mutex::new(BTreeMap::new());
+
+pub(crate) fn log_session(host: HWND) -> String {
+    // 仅作为本次运行内匿名编号的映射键，窗口句柄不会写入日志。
+    LOG_SESSIONS.lock().ok().and_then(|sessions| sessions.get(&(host as usize)).cloned())
+        .unwrap_or_else(|| format!("host-{}", host as usize))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+struct InputSnapshot {
+    system_modifiers: u16,
+    buttons: u8,
+    foreground: &'static str,
+    focus: &'static str,
+    capture: &'static str,
+    pointer_in_video: bool,
+    sampler_thread: u32,
+    sampled: bool,
+    sdl_modifiers: &'static str,
+}
+
+fn input_snapshot(host: HWND, video: HWND) -> InputSnapshot {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    let target = |window: HWND| unsafe {
+        if window.is_null() { "none" }
+        else if window == video { "video" }
+        else if window == host { "host" }
+        else if IsChild(host, window) != 0 { "shellChild" }
+        else { "other" }
+    };
+    unsafe {
+        // 这里只读取系统状态，不绑定输入队列，也不声称读取到播放器内部状态。
+        let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+        let thread = GetWindowThreadProcessId(video, std::ptr::null_mut());
+        if thread != 0 { GetGUIThreadInfo(thread, &mut info); }
+        let mut cursor = POINT::default();
+        let pointer_in_video = GetCursorPos(&mut cursor) != 0 && WindowFromPoint(cursor) == video;
+        let system_modifiers = [0xa2, 0xa3, 0xa0, 0xa1, 0xa4, 0xa5, 0x5b, 0x5c]
+            .iter().enumerate().fold(0, |mask, (bit, key)|
+                mask | if GetAsyncKeyState(*key) < 0 { 1 << bit } else { 0 });
+        let buttons = [1, 2, 4].iter().enumerate().fold(0, |mask, (bit, key)|
+            mask | if GetAsyncKeyState(*key) < 0 { 1 << bit } else { 0 });
+        InputSnapshot { system_modifiers, buttons, foreground: target(GetForegroundWindow()),
+            focus: target(info.hwndFocus), capture: target(info.hwndCapture), pointer_in_video,
+            sampler_thread: GetCurrentThreadId(), sampled: true, sdl_modifiers: "unavailable" }
+    }
+}
+
+fn log_input(event: &'static str, host: HWND, video: HWND) {
+    if !crate::control_log::enabled() || unsafe { GetForegroundWindow() } != host { return; }
+    crate::control_log::record(event, Some(&log_session(host)), serde_json::to_value(input_snapshot(host, video)).unwrap_or_default());
+}
 
 #[derive(Clone)]
 pub(crate) struct MirrorOptions {
@@ -232,6 +285,48 @@ fn texture_size(line: &str) -> Option<(u16, u16)> {
 mod tests {
     use super::{Placement, keyboard_inputs, remembered_placement, texture_size};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{INPUT_KEYBOARD, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE};
+
+    #[test]
+    fn moving_parent_requires_native_child_position_refresh() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use windows_sys::Win32::{System::LibraryLoader::GetModuleHandleW,
+            UI::WindowsAndMessaging::{CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW,
+                SetWindowPos, UnregisterClassW, WNDCLASSW, WM_WINDOWPOSCHANGED,
+                WS_CHILD, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER}};
+        static CHANGES: AtomicU32 = AtomicU32::new(0);
+        unsafe extern "system" fn child_proc(window: super::HWND, message: u32, wparam: usize, lparam: isize) -> isize {
+            if message == WM_WINDOWPOSCHANGED { CHANGES.fetch_add(1, Ordering::Relaxed); }
+            unsafe { DefWindowProcW(window, message, wparam, lparam) }
+        }
+        unsafe {
+            let instance = GetModuleHandleW(std::ptr::null());
+            let class = crate::cli_protocol::wide(&format!("ControllerGeometryProbe-{}", std::process::id()));
+            let descriptor = WNDCLASSW { lpfnWndProc: Some(child_proc), hInstance: instance,
+                lpszClassName: class.as_ptr(), ..Default::default() };
+            assert_ne!(RegisterClassW(&descriptor), 0);
+            let parent = CreateWindowExW(0, crate::cli_protocol::wide("STATIC").as_ptr(), std::ptr::null(),
+                0, 100, 100, 400, 500, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null());
+            assert!(!parent.is_null());
+            let child = CreateWindowExW(0, class.as_ptr(), std::ptr::null(), WS_CHILD,
+                10, 20, 200, 300, parent, std::ptr::null_mut(), instance, std::ptr::null());
+            assert!(!child.is_null());
+            CHANGES.store(0, Ordering::Relaxed);
+            let moved = SetWindowPos(parent, std::ptr::null_mut(), 500, 400, 400, 500, SWP_NOACTIVATE | SWP_NOZORDER);
+            let inherited_notifications = CHANGES.load(Ordering::Relaxed);
+            let unchanged = SetWindowPos(child, std::ptr::null_mut(), 10, 20, 200, 300, SWP_NOACTIVATE | SWP_NOZORDER);
+            let unchanged_notifications = CHANGES.load(Ordering::Relaxed);
+            let refreshed = SetWindowPos(child, std::ptr::null_mut(), 10, 20, 200, 300, SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED);
+            let refreshed_notifications = CHANGES.load(Ordering::Relaxed);
+            DestroyWindow(parent);
+            UnregisterClassW(class.as_ptr(), instance);
+            assert_ne!(moved, 0);
+            assert_eq!(inherited_notifications, 0, "父窗口移动不会刷新播放器的子窗口缓存");
+            assert_ne!(unchanged, 0);
+            assert_eq!(unchanged_notifications, 0, "相同几何的普通定位会被系统省略");
+            assert_ne!(refreshed, 0);
+            assert!(refreshed_notifications > 0, "同尺寸真实定位也必须产生位置刷新消息");
+        }
+    }
 
     #[test]
     fn discrete_keys_use_hardware_scancodes_and_matching_releases() {
@@ -361,16 +456,39 @@ pub(crate) fn create(app: &AppHandle, mirror: &Mirror, title: &str) -> Result<()
         .build()
         .map_err(|_| "mirrorFrameFailed")?;
     let video = mirror.video;
+    let host = shell.hwnd().map_err(|_| "mirrorFrameFailed")?.0 as HWND;
+    if let Ok(mut sessions) = LOG_SESSIONS.lock() { sessions.insert(host as usize, mirror.label.clone()); }
+    let session = log_session(host);
+    crate::control_log::record("mirror.created", Some(&session), serde_json::json!({
+        "virtual_screen": mirror.options.virtual_screen, "control_enabled": mirror.options.control_enabled,
+        "follow": mirror.options.follow, "width": mirror.original_size.0, "height": mirror.original_size.1,
+    }));
+    let window_session = session.clone();
+    let host_id = host as usize;
     shell.on_window_event(move |event| {
+        if let WindowEvent::Focused(active) = event {
+            crate::control_log::record("mirror.foreground_changed", Some(&window_session), serde_json::json!({ "active": active }));
+        }
         if matches!(event, WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed) {
+            crate::control_log::record(if matches!(event, WindowEvent::Destroyed) { "mirror.destroyed" } else { "mirror.close_requested" },
+                Some(&window_session), serde_json::json!({}));
             unsafe { PostMessageW(video as HWND, WM_CLOSE, 0, 0) };
+            if matches!(event, WindowEvent::Destroyed)
+                && let Ok(mut sessions) = LOG_SESSIONS.lock()
+            {
+                sessions.remove(&host_id);
+            }
+            if matches!(event, WindowEvent::Destroyed) { crate::mouse_trace::unregister(host_id); }
         }
     });
-    let host = shell.hwnd().map_err(|_| "mirrorFrameFailed")?.0 as HWND;
     if !attach(mirror.window(), host) {
+        crate::control_log::record("mirror.attach_failed", Some(&session), serde_json::json!({}));
         let _ = shell.destroy();
         return Err("mirrorFrameFailed");
     }
+    crate::control_log::record("mirror.attached", Some(&session), serde_json::json!({}));
+    let tracing = crate::mouse_trace::register(host as usize, video, session.clone());
+    crate::control_log::record("input.trace_registered", Some(&session), serde_json::json!({ "success": tracing }));
     install_move_handler(&shell, host, video)?;
     let app = app.clone();
     let label = mirror.label.clone();
@@ -380,6 +498,7 @@ pub(crate) fn create(app: &AppHandle, mirror: &Mirror, title: &str) -> Result<()
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
         let mut escape_was_down = false;
         let mut was_active = false;
+        let mut previous_input = None;
         while unsafe { IsWindow(video as HWND) } != 0 {
             let foreground = unsafe { GetForegroundWindow() };
             let active = foreground == host as HWND;
@@ -388,6 +507,15 @@ pub(crate) fn create(app: &AppHandle, mirror: &Mirror, title: &str) -> Result<()
                     let _ = app.emit_to(&label, &format!("mirror-blur-{label}"), ());
                 }
                 was_active = active;
+            }
+            if crate::control_log::enabled() && active {
+                let snapshot = input_snapshot(host as HWND, video as HWND);
+                if previous_input != Some(snapshot) {
+                    crate::control_log::record("input.sample_changed", Some(&session), serde_json::to_value(snapshot).unwrap_or_default());
+                    previous_input = Some(snapshot);
+                }
+            } else {
+                previous_input = None;
             }
             let escape = active && unsafe { GetAsyncKeyState(VK_ESCAPE as i32) } < 0;
             if escape && !escape_was_down {
@@ -401,6 +529,8 @@ pub(crate) fn create(app: &AppHandle, mirror: &Mirror, title: &str) -> Result<()
             }
             std::thread::sleep(std::time::Duration::from_millis(if active { 35 } else { 200 }));
         }
+        crate::control_log::record("mirror.closed", Some(&session), serde_json::json!({}));
+        crate::mouse_trace::unregister(host);
         if let Some(window) = app.get_webview_window(&label) {
             let _ = window.destroy();
         }
@@ -466,7 +596,6 @@ pub(crate) fn position(window: &WebviewWindow, mirror: &Mirror, bounds: VideoBou
             if SetWindowPos(video, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW) == 0 {
                 return Err("mirrorFrameFailed");
             }
-            PostMessageW(video, WM_SIZE, 0, ((height << 16) | width) as isize);
         } else if !correct_video_bounds(host, video, bounds) {
             return Err("mirrorFrameFailed");
         }
@@ -538,17 +667,31 @@ fn correct_video_bounds(host: HWND, video: HWND, bounds: VideoBounds) -> bool {
 }
 
 pub(crate) fn shortcut(video: HWND, key: usize, scan: usize, shift: bool, extended: bool) -> Result<(), &'static str> {
-    fn post(video: HWND, down: bool, key: usize, scan: usize, extended: bool) -> bool {
+    fn post(video: HWND, session: &str, operation: u64, down: bool, key: usize, scan: usize, extended: bool) -> bool {
         let flags = 1 | (scan << 16) | (usize::from(extended) << 24) | if down { 0 } else { 3 << 30 };
-        unsafe { PostMessageW(video, if down { WM_KEYDOWN } else { WM_KEYUP }, key, flags as isize) != 0 }
+        let queued = unsafe { PostMessageW(video, if down { WM_KEYDOWN } else { WM_KEYUP }, key, flags as isize) != 0 };
+        crate::control_log::record("shortcut.queued", Some(session), serde_json::json!({
+            "operation": operation, "key_code": key, "scan_code": scan, "pressed": down,
+            "extended": extended, "queued": queued,
+        }));
+        queued
     }
-    let ctrl_down = post(video, true, 0x11, 0x1d, true);
-    let shift_down = !shift || post(video, true, 0x10, 0x2a, false);
-    let key_down = post(video, true, key, scan, extended);
-    let key_up = post(video, false, key, scan, extended);
-    let shift_up = !shift || post(video, false, 0x10, 0x2a, false);
-    let ctrl_up = post(video, false, 0x11, 0x1d, true);
-    if ctrl_down && shift_down && key_down && key_up && shift_up && ctrl_up {
+    let host = unsafe { GetParent(video) };
+    let session = log_session(host);
+    let operation = NEXT_INPUT_OPERATION.fetch_add(1, Ordering::Relaxed);
+    crate::control_log::record("shortcut.started", Some(&session), serde_json::json!({ "operation": operation, "key_code": key, "shift": shift }));
+    log_input("shortcut.input_before", host, video);
+    let ctrl_down = post(video, &session, operation, true, 0x11, 0x1d, true);
+    let shift_down = !shift || post(video, &session, operation, true, 0x10, 0x2a, false);
+    let key_down = post(video, &session, operation, true, key, scan, extended);
+    let key_up = post(video, &session, operation, false, key, scan, extended);
+    let shift_up = !shift || post(video, &session, operation, false, 0x10, 0x2a, false);
+    let ctrl_up = post(video, &session, operation, false, 0x11, 0x1d, true);
+    let success = ctrl_down && shift_down && key_down && key_up && shift_up && ctrl_up;
+    // 成功仅表示消息已入队，不表示播放器已经处理。
+    crate::control_log::record("shortcut.completed", Some(&session), serde_json::json!({ "operation": operation, "queued": success }));
+    log_input("shortcut.input_after", host, video);
+    if success {
         Ok(())
     } else {
         Err("mirrorActionFailed")
@@ -598,8 +741,10 @@ fn focused_child() -> HWND {
 }
 
 fn focus_video(host: HWND, video: HWND) -> bool {
+    log_input("focus.restore_started", host, video);
     unsafe {
         if GetForegroundWindow() != host || GetParent(video) != host || IsWindowVisible(video) == 0 {
+            crate::control_log::record("focus.restore_skipped", Some(&log_session(host)), serde_json::json!({}));
             return false;
         }
         if focused_child() != video {
@@ -607,12 +752,19 @@ fn focus_video(host: HWND, video: HWND) -> bool {
             let video_thread = GetWindowThreadProcessId(video, std::ptr::null_mut());
             let attached = video_thread != 0 && current_thread != video_thread
                 && AttachThreadInput(current_thread, video_thread, 1) != 0;
+            crate::control_log::record("focus.thread_attach", Some(&log_session(host)), serde_json::json!({
+                "success": attached, "needed": video_thread != 0 && current_thread != video_thread,
+            }));
             SetFocus(video);
             if attached {
-                AttachThreadInput(current_thread, video_thread, 0);
+                let detached = AttachThreadInput(current_thread, video_thread, 0) != 0;
+                crate::control_log::record("focus.thread_detach", Some(&log_session(host)), serde_json::json!({ "success": detached }));
             }
         }
-        focused_child() == video
+        let focused = focused_child() == video;
+        log_input("focus.restore_completed", host, video);
+        crate::control_log::record("focus.restore_result", Some(&log_session(host)), serde_json::json!({ "success": focused }));
+        focused
     }
 }
 
@@ -637,34 +789,59 @@ pub(crate) async fn prepare_input(shell: WebviewWindow, video: usize) -> Result<
 
 fn install_move_handler(shell: &WebviewWindow, host: HWND, video: usize) -> Result<(), &'static str> {
     const RESTORE_INPUT: u32 = WM_APP + 0x6f2;
+    const REFRESH_GEOMETRY: usize = 1;
+    const RESTORE_FOCUS: usize = 2;
     unsafe extern "system" fn on_message(
         host: HWND, message: u32, wparam: usize, lparam: isize, id: usize, video: usize,
     ) -> isize {
+        if message == WM_ENTERSIZEMOVE {
+            log_input("mirror.move_started", host, video as HWND);
+        } else if message == WM_EXITSIZEMOVE || message == WM_DPICHANGED {
+            log_input("mirror.move_ended", host, video as HWND);
+            let mut rect = RECT::default();
+            if unsafe { GetClientRect(host, &mut rect) } != 0 {
+                crate::control_log::record("mirror.resized", Some(&log_session(host)), serde_json::json!({
+                    "width": rect.right - rect.left, "height": rect.bottom - rect.top,
+                }));
+            }
+        }
         if message == WM_NCDESTROY {
             unsafe { RemoveWindowSubclass(host, Some(on_message), id); }
         }
         let result = unsafe { DefSubclassProc(host, message, wparam, lparam) };
-        if message == WM_EXITSIZEMOVE || message == WM_DPICHANGED || message == WM_SETFOCUS {
-            // 网页宿主在默认焦点处理期间会聚焦网页，随后排队恢复视频键盘焦点。
-            // 聚焦消息只恢复输入，尺寸变化另行刷新视频坐标。
-            let geometry_changed = usize::from(message != WM_SETFOCUS);
-            unsafe { PostMessageW(host, RESTORE_INPUT, geometry_changed, 0); }
+        if message == WM_EXITSIZEMOVE || message == WM_DPICHANGED || message == WM_SETFOCUS || message == WM_WINDOWPOSCHANGED {
+            // 父窗口移动不会向子窗口发送位置变化。通过真实窗口操作刷新播放器
+            // 缓存；纯几何变化不抢焦点，避免移动过程中改变鼠标捕获。
+            let flags = match message {
+                WM_SETFOCUS => RESTORE_FOCUS,
+                WM_WINDOWPOSCHANGED => REFRESH_GEOMETRY,
+                _ => REFRESH_GEOMETRY | RESTORE_FOCUS,
+            };
+            unsafe { PostMessageW(host, RESTORE_INPUT, flags, 0); }
         } else if message == RESTORE_INPUT {
             let video = video as HWND;
             unsafe {
-                if GetParent(video) == host && IsWindowVisible(video) != 0 {
-                    if wparam != 0 {
+                if GetParent(video) == host && IsWindowVisible(video) != 0 && IsIconic(host) == 0 {
+                    if wparam & REFRESH_GEOMETRY != 0 {
                         let mut origin = POINT::default();
                         let mut rect = RECT::default();
-                        if ClientToScreen(video, &mut origin) != 0 && ScreenToClient(host, &mut origin) != 0 {
-                            let coords = (origin.x as u16 as u32) | ((origin.y as u16 as u32) << 16);
-                            PostMessageW(video, WM_MOVE, 0, coords as isize);
-                        }
-                        if GetClientRect(video, &mut rect) != 0 {
-                            PostMessageW(video, WM_SIZE, 0, ((rect.bottom << 16) | rect.right) as isize);
+                        if ClientToScreen(video, &mut origin) != 0 {
+                            let screen_origin = origin;
+                            if ScreenToClient(host, &mut origin) == 0 { return result; }
+                            if GetClientRect(video, &mut rect) != 0 {
+                                // 同位置、同尺寸的普通调用会被系统合并；强制框架计算
+                                // 才会产生播放器实际处理的位置事件，不必做可见尺寸抖动。
+                                let queued = SetWindowPos(video, std::ptr::null_mut(), origin.x, origin.y,
+                                    rect.right, rect.bottom, SWP_NOACTIVATE | SWP_NOZORDER | SWP_ASYNCWINDOWPOS | SWP_FRAMECHANGED) != 0;
+                                crate::control_log::record("geometry.refresh_requested", Some(&log_session(host)), serde_json::json!({
+                                    "queued": queued, "client_x": origin.x, "client_y": origin.y,
+                                    "video_screen_x": screen_origin.x, "video_screen_y": screen_origin.y,
+                                    "width": rect.right, "height": rect.bottom,
+                                }));
+                            }
                         }
                     }
-                    focus_video(host, video);
+                    if wparam & RESTORE_FOCUS != 0 { focus_video(host, video); }
                 }
             }
         }
@@ -724,22 +901,34 @@ pub(crate) fn press_key(window: &WebviewWindow, mirror: &Mirror, key: &str) -> R
     let inputs = keyboard_inputs(key).ok_or("invalidArguments")?;
     let host = window.hwnd().map_err(|_| "mirrorFrameFailed")?.0 as HWND;
     let video = mirror.window();
+    let session = log_session(host);
+    let operation = NEXT_INPUT_OPERATION.fetch_add(1, Ordering::Relaxed);
+    crate::control_log::record("cli.key_started", Some(&session), serde_json::json!({ "operation": operation, "key": key }));
+    log_input("cli.input_before", host, video);
     unsafe {
         if GetForegroundWindow() != host || GetParent(video) != host
             || IsWindowVisible(video) == 0 || focused_child() != video
         {
+            crate::control_log::record("cli.key_completed", Some(&session), serde_json::json!({ "operation": operation, "success": false, "error_code": "focusDenied" }));
             return Err("focusDenied");
         }
         // 同批提交按下和抬起，保持原始键盘输入的顺序。
         let sent = SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+        let mut release_sent = None;
         if sent != inputs.len() as u32 {
             if sent == 1 {
                 // 部分提交时补发抬起，避免留下按住的按键。
-                SendInput(1, &inputs[1], std::mem::size_of::<INPUT>() as i32);
+                release_sent = Some(SendInput(1, &inputs[1], std::mem::size_of::<INPUT>() as i32) == 1);
             }
+            crate::control_log::record("cli.key_completed", Some(&session), serde_json::json!({
+                "operation": operation, "sent_count": sent, "success": false, "release_sent": release_sent,
+                "error_code": "mirrorActionFailed",
+            }));
             return Err("mirrorActionFailed");
         }
+        crate::control_log::record("cli.key_completed", Some(&session), serde_json::json!({ "operation": operation, "sent_count": sent, "success": true }));
     }
+    log_input("cli.input_after", host, video);
     Ok(())
 }
 

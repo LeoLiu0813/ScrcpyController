@@ -33,10 +33,20 @@ const HELP: &str = "安卓控制台命令行\n\
   toolbar <设备序列号> click-toolbar <横坐标> <纵坐标>  真实点击前台投屏窗口工具栏\n\
     坐标为宿主客户区物理像素，点击目标须位于外框控件且不属于手机画面。\n\
   tray <status|show|hide|device|lock|exit>  托盘状态与操作\n\
+  logs <status|tail|enable|disable|export|show>  控制日志：状态、查看、开启、关闭、导出、显示页面\n\
+  logs tail [条数]                 查看最近日志，最多一千条，结果过长会截取\n\
   --json                          输出单行结构化结果";
 
 fn parse(args: &[String]) -> Option<Request> {
     Some(match args {
+        [command, operation] if command == "logs" && matches!(operation.as_str(), "status" | "tail" | "enable" | "disable" | "export" | "show") => {
+            Request::Logs { command: operation.clone(), limit: None }
+        }
+        [command, operation, limit] if command == "logs" && operation == "tail" => {
+            let limit = limit.parse().ok()?;
+            if !(1..=1000).contains(&limit) { return None; }
+            Request::Logs { command: operation.clone(), limit: Some(limit) }
+        }
         [command, serial, operation, args @ ..] if command == "toolbar" && !serial.is_empty() => {
             Request::Toolbar {
                 serial: serial.clone(),
@@ -247,4 +257,22 @@ pub fn run(integrated: bool) -> ExitCode {
         eprintln!("{}", response.error.as_deref().unwrap_or("unknownError"));
     }
     ExitCode::from(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(value: &str) -> Vec<String> { value.split_whitespace().map(str::to_owned).collect() }
+
+    #[test]
+    fn log_commands_accept_only_supported_operations_and_bounded_counts() {
+        for operation in ["status", "tail", "enable", "disable", "export", "show"] {
+            assert!(matches!(parse(&args(&format!("logs {operation}"))), Some(Request::Logs { .. })));
+        }
+        assert!(matches!(parse(&args("logs tail 1000")), Some(Request::Logs { limit: Some(1000), .. })));
+        for invalid in ["logs", "logs clear", "logs tail 0", "logs tail 1001", "logs tail nope", "logs export private-path"] {
+            assert!(parse(&args(invalid)).is_none());
+        }
+    }
 }

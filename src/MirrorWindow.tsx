@@ -21,6 +21,10 @@ const icons = {
 };
 type Action = keyof typeof icons;
 type Zone = "rail" | "more";
+function logUi(event: "more" | "sidebar" | "fullscreen" | "drag" | "action", detail: { enabled?: boolean; action?: Action; zone?: Zone } = {}) {
+  // 不等待磁盘写入，不改变控制和焦点恢复的顺序。
+  void invoke("mirror_log_ui", { event, ...detail }).catch(() => {});
+}
 type Layout = {
   opacity: number; visible: boolean; rail: Action[]; more: Action[];
   buttonColor: string; buttonOpacity: number; frameBorder: number; pictureRadius: number;
@@ -533,6 +537,7 @@ export default function MirrorWindow() {
     const setOpen = (value: boolean) => {
       moreOpen.current = value;
       setMore(value);
+      logUi("more", { enabled: value });
     };
     const frame = document.querySelector(".mirror-shell");
     const widthBefore = frame?.getBoundingClientRect().width;
@@ -608,6 +613,7 @@ export default function MirrorWindow() {
       await shell.setFullscreen(false);
       setFullscreen(false);
       setReveal(false);
+      logUi("fullscreen", { enabled: false });
     }
     await restoreVideoFocus();
   }
@@ -625,6 +631,7 @@ export default function MirrorWindow() {
       if (more) await changeMore(false);
       if (!info || !viewport.current || fullscreen || await shell.isMaximized()) {
         setSidebarOverride(next);
+        logUi("sidebar", { enabled: next });
         return next;
       }
       const box = viewport.current.getBoundingClientRect();
@@ -655,6 +662,7 @@ export default function MirrorWindow() {
         setSidebarOverride(sidebarEnabled);
         throw error;
       }
+      logUi("sidebar", { enabled: next });
       return next;
     } finally {
       setLockedPicture(undefined);
@@ -735,6 +743,7 @@ export default function MirrorWindow() {
 
   async function act(action: Action) {
     if (dragRef.current || busy) throw "mirrorActionFailed";
+    logUi("action", { action });
     setError("");
     setBusy(true);
     try {
@@ -743,6 +752,7 @@ export default function MirrorWindow() {
         await shell.setFullscreen(!fullscreen);
         setFullscreen(!fullscreen);
         setReveal(false);
+        logUi("fullscreen", { enabled: !fullscreen });
       } else if (action === "actual") {
         showSizingNotice();
         await showOriginalPixels();
@@ -806,6 +816,7 @@ export default function MirrorWindow() {
       const index = target.before ? next[target.zone].indexOf(target.before) : -1;
       next[target.zone].splice(index < 0 ? next[target.zone].length : index + Number(!!target.after), 0, action);
       saveLayout(next);
+      logUi("drag", { action, zone: target.zone });
     }
     dragEnd();
   }

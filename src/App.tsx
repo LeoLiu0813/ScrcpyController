@@ -2,7 +2,7 @@ import { AudioLines, ClipboardList, Film, MonitorCog, Terminal, UserRound } from
 import ControlAppearance from "./ControlAppearance";
 import { Monitor, Settings, RefreshCw, Smartphone, Trash2, ListChecks, WifiOff, Wifi,
   Play, Scan, Square, LockKeyhole, SlidersHorizontal, Pencil, RotateCcw, Minus, Maximize2, X,
-  AppWindow, GripVertical, Languages, Palette, PackageCheck } from "lucide-react";
+  AppWindow, GripVertical, Languages, Palette, PackageCheck, ScrollText } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -14,6 +14,7 @@ import ConnectionDialog from "./ConnectionDialog";
 import { MirrorAppearance } from "./MirrorWindow";
 import ErrorToast from "./ErrorToast";
 import EngineUpdate from "./EngineUpdate";
+import ControlLog from "./ControlLog";
 import LaunchArgumentsEditor from "./LaunchArgumentsEditor";
 import { saveLocalStorage } from "./localStorage";
 import "./App.css";
@@ -130,7 +131,7 @@ export default function App() {
   const [closeBehavior, setCloseBehavior] = useState<"tray" | "exit">(() =>
     localStorage.getItem("main-close-behavior") === "exit" ? "exit" : "tray");
   const [toolSection, setToolSection] = useState<ToolSection>("query");
-  const [settingsSection, setSettingsSection] = useState<"general" | "appearance" | "engine">("general");
+  const [settingsSection, setSettingsSection] = useState<"general" | "appearance" | "engine" | "logs">("general");
   const [enginePanel, setEnginePanel] = useState<HTMLDivElement | null>(null);
   const [page, setPage] = useState<"devices" | "tools" | "appWindows" | "settings">("devices");
   const [profileSerial, setProfileSerial] = useState<string>();
@@ -530,6 +531,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const listener = listen("open-control-logs", () => {
+      setSettingsSection("logs");
+      setPage("settings");
+    });
+    return () => { void listener.then((unlisten) => unlisten()).catch(() => {}); };
+  }, []);
+
+  useEffect(() => {
     const listener = listen<string>("tray-device-error", ({ payload }) => setActionError(errorKey(payload)));
     return () => { void listener.then((unlisten) => unlisten()).catch(() => {}); };
   }, []);
@@ -757,15 +766,17 @@ export default function App() {
           </button>
         </div>}
         {page === "settings" ? (
-          <div className="settings-layout">
+          <div className="settings-layout settings-icon-layout">
             <nav className="section-sidebar" aria-label={t("settings")}>
               {([
                 ["general", "generalSettings", Languages],
                 ["appearance", "appearance", Palette],
                 ["engine", "engineUpdates", PackageCheck],
+                ["logs", "controlLogs", ScrollText],
               ] as const).map(([section, label, Glyph]) => <button type="button" key={section}
+                className="icon-button" aria-label={t(label)} data-tip={t(label)}
                 aria-pressed={settingsSection === section} onClick={() => setSettingsSection(section)}>
-                <Glyph size={17} aria-hidden="true" /><span>{t(label)}</span>
+                <Glyph aria-hidden="true" />
               </button>)}
             </nav>
             <div className="section-content settings-stack">
@@ -804,6 +815,7 @@ export default function App() {
                 <MirrorAppearance t={t} />
               </>}
               {settingsSection === "engine" && <div ref={setEnginePanel} />}
+              {settingsSection === "logs" && <ControlLog t={t} />}
             </div>
           </div>
         ) : page === "appWindows" ? (
