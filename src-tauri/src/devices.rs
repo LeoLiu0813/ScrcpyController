@@ -680,6 +680,21 @@ pub(crate) fn cli_click_video(window: &tauri::WebviewWindow, x: i32, y: i32) -> 
     crate::mirror::click_video(window, &mirror, x, y)
 }
 
+pub(crate) fn cli_click_toolbar(window: &tauri::WebviewWindow, x: i32, y: i32) -> Result<()> {
+    let (_, mirror, target) = mirror_session(window)?;
+    target.check(&engine(window.app_handle())?)?;
+    crate::mirror::click_toolbar(window, &mirror, x, y)
+}
+
+pub(crate) fn cli_press_key(window: &tauri::WebviewWindow, key: &str) -> Result<()> {
+    let (_, mirror, target) = mirror_session(window)?;
+    if !mirror.options.control_enabled {
+        return Err("mirrorActionFailed");
+    }
+    target.check(&engine(window.app_handle())?)?;
+    crate::mirror::press_key(window, &mirror, key)
+}
+
 pub(crate) fn cli_video_geometry(window: &tauri::WebviewWindow) -> Result<serde_json::Value> {
     let (_, mirror, _) = mirror_session(window)?;
     let mut geometry = crate::mirror::geometry(window, mirror.window())?;

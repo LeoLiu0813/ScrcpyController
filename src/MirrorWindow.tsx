@@ -233,7 +233,6 @@ export default function MirrorWindow() {
   const extension = useRef<{ left: number; expandedLeft: number }>(undefined);
   const menuPending = useRef(false);
   const priming = useRef(true);
-  const inputReady = useRef(false);
   const [ready, setReady] = useState(false);
   const saving = useRef<ReturnType<typeof setTimeout>>(undefined);
   const cliHandler = useRef<(command: ToolbarRequest) => Promise<unknown>>(async () => null);
@@ -377,12 +376,24 @@ export default function MirrorWindow() {
     };
   }
 
+  async function restoreVideoFocus(preserveKeyboardNavigation = true) {
+    // 等待按钮默认操作和当前布局切换完成后，再把键盘交回手机画面。
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    if (priming.current || menuPending.current || changingSidebar.current || dragRef.current) return;
+    // 用制表键操作工具栏时，保留按钮焦点以便继续键盘导航。
+    if (preserveKeyboardNavigation && document.hasFocus()
+      && document.activeElement instanceof HTMLButtonElement && document.activeElement.matches(":focus-visible")) return;
+    await invoke<boolean>("mirror_prepare_input").catch(() => false);
+  }
+
   async function togglePin() {
-    const next = !await shell.isAlwaysOnTop();
-    await shell.setAlwaysOnTop(next);
-    setTop(next);
-    setCaption((current) => current === t(next ? "mirrorPin" : "mirrorUnpin") ? t(next ? "mirrorUnpin" : "mirrorPin") : current);
-    return next;
+    try {
+      const next = !await shell.isAlwaysOnTop();
+      await shell.setAlwaysOnTop(next);
+      setTop(next);
+      setCaption((current) => current === t(next ? "mirrorPin" : "mirrorUnpin") ? t(next ? "mirrorUnpin" : "mirrorPin") : current);
+      return next;
+    } finally { await restoreVideoFocus(); }
   }
 
   useEffect(() => {
@@ -417,7 +428,7 @@ export default function MirrorWindow() {
           } finally { if (!stopped) setLockedWidth(undefined); }
         }
         if (!stopped) {
-          inputReady.current = await invoke<boolean>("mirror_prepare_input").catch(() => false);
+          await invoke<boolean>("mirror_prepare_input").catch(() => false);
           await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         }
       } finally {
@@ -500,9 +511,7 @@ export default function MirrorWindow() {
       resumeDismissal();
     }), shell.onFocusChanged(({ payload }) => {
       if (payload) resumeDismissal();
-      if (payload && !inputReady.current) {
-        void invoke<boolean>("mirror_prepare_input").then((focused) => { inputReady.current = focused; }).catch(() => {});
-      }
+      if (payload) void restoreVideoFocus(false);
     })];
     return () => {
       clearTimeout(saving.current);
@@ -589,6 +598,7 @@ export default function MirrorWindow() {
       setCaption("");
       menuPending.current = false;
       if (dismissMoreAfterInteraction.current && !dismissMoreOnRestore.current) dismissMore();
+      await restoreVideoFocus();
     }
   }
 
@@ -599,6 +609,7 @@ export default function MirrorWindow() {
       setFullscreen(false);
       setReveal(false);
     }
+    await restoreVideoFocus();
   }
 
   useEffect(() => setSidebarOverride(undefined), [layout.visible]);
@@ -649,6 +660,7 @@ export default function MirrorWindow() {
       setLockedPicture(undefined);
       setCaption("");
       changingSidebar.current = false;
+      await restoreVideoFocus();
     }
   }
 
@@ -760,7 +772,10 @@ export default function MirrorWindow() {
     } catch (reason) {
       setError(typeof reason === "string" && Object.prototype.hasOwnProperty.call(locales[locale], reason) ? reason : "mirrorActionFailed");
       throw reason;
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+      if (action !== "sendFiles" && action !== "captureFolder") await restoreVideoFocus();
+    }
   }
 
   function dragEnd() {
@@ -770,6 +785,7 @@ export default function MirrorWindow() {
     setDragging(undefined);
     setInsertion(undefined);
     if (dismissMoreAfterInteraction.current) dismissMore();
+    void restoreVideoFocus();
   }
   function dragOver(event: DragEvent, target: Drop) {
     if (!dragRef.current) return;
@@ -1024,7 +1040,7 @@ export default function MirrorWindow() {
         </button>
         {([
           ["mirrorMinimize", Minus, async () => { if (more) await changeMore(false); await shell.minimize(); }],
-          ["mirrorMaximize", Maximize2, async () => { if (menuPending.current) return; if (more) await changeMore(false); await shell.toggleMaximize(); }],
+          ["mirrorMaximize", Maximize2, async () => { if (menuPending.current) return; if (more) await changeMore(false); await shell.toggleMaximize(); await restoreVideoFocus(); }],
           ["mirrorClose", X, async () => { await savePlacement().catch(() => {}); await shell.close(); }],
         ] as const).map(([label, Glyph, run]) => <button key={label} type="button" className="icon-button"
           {...tip(t(label))} onClick={() => void run().catch(() => setError("mirrorFrameFailed"))}>

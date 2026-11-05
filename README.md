@@ -44,7 +44,7 @@
 
 ## 单文件发行版
 
-下载[发布页](https://github.com/LeoLiu0813/ScrcpyController/releases)的 `ScrcpyController-v0.1.3-windows-x64.exe`（微软桌面系统 64 位可执行文件）并运行，无需安装控制台或启动开发服务。系统需有 WebView2（微软网页渲染运行库）。投屏使用本机管理的 scrcpy（官方投屏引擎）。首次使用可在「设置 → 投屏引擎更新」安装，也可按下方步骤放入已校验的引擎。通过界面下载安装需要 GnuPG（签名验证工具）。
+下载[发布页](https://github.com/LeoLiu0813/ScrcpyController/releases)的 `ScrcpyController-v0.1.4-windows-x64.exe`（微软桌面系统 64 位可执行文件）并运行，无需安装控制台或启动开发服务。系统需有 WebView2（微软网页渲染运行库）。投屏使用本机管理的 scrcpy（官方投屏引擎）。首次使用可在「设置 → 投屏引擎更新」安装，也可按下方步骤放入已校验的引擎。通过界面下载安装需要 GnuPG（签名验证工具）。
 
 用 `npm run tauri -- build --no-bundle`（构建单文件程序）复现。发行版同一个可执行文件也可带参数使用，例如 `--json tray status`（以结构化格式查询托盘状态）。
 
@@ -115,13 +115,16 @@ $shot = (& $controller --json screenshot $serial | ConvertFrom-Json).result
 & $controller --json toolbar $serial action screenshot
 & $controller --json toolbar $serial action fullscreen
 & $controller --json toolbar $serial exit-fullscreen
+& $controller --json toolbar $serial key right # 向前台投屏发送方向右键
 ```
 
 - `state`（读取状态）返回快捷栏布局、弹出方向、全屏状态以及外框和投屏画面的实际尺寸。
 - `drag`（拖放）接收快捷项、目标区和可选的插入位置。目标区是 `rail`（右侧栏）或 `more`（更多菜单）。给出目标快捷项时插到它前面，省略时追加到末尾。
 - `move`（移动）使用桌面物理像素坐标。`resize`（缩放）使用逻辑像素宽高。`minimize`（最小化）和 `restore`（还原）只影响指定设备窗口。
 - `sidebar`（收起或展开侧栏）只影响指定设备的投屏窗口。`click-video`（点击投屏画面）使用从原生画面左上角开始的物理像素坐标，发送前会核对鼠标命中目标。
+- `click-toolbar`（真实点击外框控件）使用宿主客户区的物理像素坐标，目标窗口须处于前台，命中控件须属于该宿主且位于手机画面之外。可用于验证点击侧栏和标题栏按钮后的焦点状态。
 - `drag-window`（拖动标题栏）使用桌面物理像素偏移，仅在目标投屏窗口处于前台时操作。可用 `state`（读取状态）检查移动后的画面命中和输入焦点。
+- `key`（真实桌面按键）支持 `left`（左）、`right`（右）、`up`（上）、`down`（下）、`backspace`（退格）、`enter`（回车）、`escape`（退出）和 `tab`（制表）。目标投屏必须允许控制、处于前台且键盘焦点位于原生视频，发送前核对设备身份。结果中的 `sent`（已发送）表示系统输入已注入，手机页面效果需要另行验证。独立应用窗口可通过 `app-toolbar`（应用快捷栏接口）调用相同操作。
 
 ### 系统托盘
 

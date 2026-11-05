@@ -289,6 +289,27 @@ async fn toolbar(
         devices::cli_click_video(&window, x, y)?;
         return Ok(json!({ "x": x, "y": y }));
     }
+    if operation == "click-toolbar" {
+        let [x, y] = args.as_slice() else {
+            return Err("invalidArguments");
+        };
+        let (x, y) = (
+            x.parse().map_err(|_| "invalidArguments")?,
+            y.parse().map_err(|_| "invalidArguments")?,
+        );
+        devices::cli_click_toolbar(&window, x, y)?;
+        return Ok(json!({ "x": x, "y": y }));
+    }
+    if operation == "key" {
+        let [key] = args.as_slice() else {
+            return Err("invalidArguments");
+        };
+        if !matches!(key.as_str(), "left" | "right" | "up" | "down" | "backspace" | "enter" | "escape" | "tab") {
+            return Err("invalidArguments");
+        }
+        devices::cli_press_key(&window, key)?;
+        return Ok(json!({ "key": key, "sent": true }));
+    }
     if !matches!(
         operation,
         "state"

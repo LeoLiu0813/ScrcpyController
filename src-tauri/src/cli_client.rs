@@ -27,6 +27,11 @@ const HELP: &str = "安卓控制台命令行\n\
   screenshot <设备序列号>          截图并返回路径与尺寸\n\
   tap <设备序列号> <横坐标> <纵坐标> <截图宽> <截图高>\n\
   toolbar <设备序列号> <操作>      控制和检查右侧快捷栏\n\
+  toolbar <设备序列号> key <按键>  向前台投屏发送真实键盘按键\n\
+    left（左）、right（右）、up（上）、down（下）、backspace（退格）、enter（回车）、escape（退出）、tab（制表）\n\
+    成功表示系统输入已注入，手机页面效果需要另行核对。\n\
+  toolbar <设备序列号> click-toolbar <横坐标> <纵坐标>  真实点击前台投屏窗口工具栏\n\
+    坐标为宿主客户区物理像素，点击目标须位于外框控件且不属于手机画面。\n\
   tray <status|show|hide|device|lock|exit>  托盘状态与操作\n\
   --json                          输出单行结构化结果";
 

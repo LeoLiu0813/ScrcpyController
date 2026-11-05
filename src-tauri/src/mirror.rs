@@ -11,12 +11,12 @@ use windows_sys::Win32::{
     Foundation::{GetLastError, HWND, POINT, RECT, SetLastError},
     Graphics::Gdi::{ClientToScreen, CreateRectRgn, CreateRoundRectRgn, DeleteObject, EqualRgn, GetWindowRgn, ScreenToClient, SetWindowRgn},
     System::Threading::{AttachThreadInput, GetCurrentThreadId},
-    UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT, SendInput, SetFocus},
+    UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEINPUT, SendInput, SetFocus},
     UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
     UI::WindowsAndMessaging::{
-        ChildWindowFromPointEx, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, GWL_STYLE, GetAncestor, GA_ROOT, GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO, GetParent, GetWindowRect, SetCursorPos, WindowFromPoint, IsWindowVisible, IsIconic, GetWindowLongPtrW, HWND_TOP, IsWindow, PostMessageW,
+        ChildWindowFromPointEx, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, GWL_STYLE, GetAncestor, GA_ROOT, GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO, GetParent, GetWindowRect, SetCursorPos, WindowFromPoint, IsChild, IsWindowVisible, IsIconic, GetWindowLongPtrW, HWND_TOP, IsWindow, PostMessageW,
         SW_HIDE, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetParent, SetWindowLongPtrW,
-        SetWindowPos, ShowWindowAsync, WM_APP, WM_CLOSE, WM_DPICHANGED, WM_EXITSIZEMOVE, WM_MOUSEMOVE, WM_MOVE, WM_NCDESTROY, WM_SIZE, WM_KEYDOWN, WM_KEYUP, WS_CHILD, WS_POPUP,
+        SetWindowPos, ShowWindowAsync, WM_APP, WM_CLOSE, WM_DPICHANGED, WM_EXITSIZEMOVE, WM_MOUSEMOVE, WM_MOVE, WM_NCDESTROY, WM_SETFOCUS, WM_SIZE, WM_KEYDOWN, WM_KEYUP, WS_CHILD, WS_POPUP,
     },
 };
 
@@ -230,7 +230,28 @@ fn texture_size(line: &str) -> Option<(u16, u16)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Placement, remembered_placement, texture_size};
+    use super::{Placement, keyboard_inputs, remembered_placement, texture_size};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{INPUT_KEYBOARD, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE};
+
+    #[test]
+    fn discrete_keys_use_hardware_scancodes_and_matching_releases() {
+        for (name, scancode, extended) in [
+            ("left", 0x4b, true), ("right", 0x4d, true),
+            ("up", 0x48, true), ("down", 0x50, true),
+            ("backspace", 0x0e, false), ("enter", 0x1c, false),
+            ("escape", 0x01, false), ("tab", 0x0f, false),
+        ] {
+            let [down, up] = keyboard_inputs(name).unwrap();
+            let flags = KEYEVENTF_SCANCODE | if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
+            assert_eq!((down.r#type, up.r#type), (INPUT_KEYBOARD, INPUT_KEYBOARD));
+            unsafe {
+                assert_eq!((down.Anonymous.ki.wVk, up.Anonymous.ki.wVk), (0, 0));
+                assert_eq!((down.Anonymous.ki.wScan, up.Anonymous.ki.wScan), (scancode, scancode));
+                assert_eq!((down.Anonymous.ki.dwFlags, up.Anonymous.ki.dwFlags), (flags, flags | KEYEVENTF_KEYUP));
+            }
+        }
+        assert!(keyboard_inputs("unknown").is_none());
+    }
 
     #[test]
     fn legacy_placement_uses_logical_limits_at_the_destination_scale() {
@@ -623,21 +644,25 @@ fn install_move_handler(shell: &WebviewWindow, host: HWND, video: usize) -> Resu
             unsafe { RemoveWindowSubclass(host, Some(on_message), id); }
         }
         let result = unsafe { DefSubclassProc(host, message, wparam, lparam) };
-        if message == WM_EXITSIZEMOVE || message == WM_DPICHANGED {
-            // Run after the system completes its move loop or monitor-scale resize.
-            unsafe { PostMessageW(host, RESTORE_INPUT, 0, 0); }
+        if message == WM_EXITSIZEMOVE || message == WM_DPICHANGED || message == WM_SETFOCUS {
+            // 网页宿主在默认焦点处理期间会聚焦网页，随后排队恢复视频键盘焦点。
+            // 聚焦消息只恢复输入，尺寸变化另行刷新视频坐标。
+            let geometry_changed = usize::from(message != WM_SETFOCUS);
+            unsafe { PostMessageW(host, RESTORE_INPUT, geometry_changed, 0); }
         } else if message == RESTORE_INPUT {
             let video = video as HWND;
             unsafe {
                 if GetParent(video) == host && IsWindowVisible(video) != 0 {
-                    let mut origin = POINT::default();
-                    let mut rect = RECT::default();
-                    if ClientToScreen(video, &mut origin) != 0 && ScreenToClient(host, &mut origin) != 0 {
-                        let coords = (origin.x as u16 as u32) | ((origin.y as u16 as u32) << 16);
-                        PostMessageW(video, WM_MOVE, 0, coords as isize);
-                    }
-                    if GetClientRect(video, &mut rect) != 0 {
-                        PostMessageW(video, WM_SIZE, 0, ((rect.bottom << 16) | rect.right) as isize);
+                    if wparam != 0 {
+                        let mut origin = POINT::default();
+                        let mut rect = RECT::default();
+                        if ClientToScreen(video, &mut origin) != 0 && ScreenToClient(host, &mut origin) != 0 {
+                            let coords = (origin.x as u16 as u32) | ((origin.y as u16 as u32) << 16);
+                            PostMessageW(video, WM_MOVE, 0, coords as isize);
+                        }
+                        if GetClientRect(video, &mut rect) != 0 {
+                            PostMessageW(video, WM_SIZE, 0, ((rect.bottom << 16) | rect.right) as isize);
+                        }
                     }
                     focus_video(host, video);
                 }
@@ -670,6 +695,52 @@ fn send_mouse(flags: u32) -> bool {
         Anonymous: INPUT_0 { mi: MOUSEINPUT { dwFlags: flags, ..Default::default() } },
     };
     unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) == 1 }
+}
+
+fn keyboard_inputs(key: &str) -> Option<[INPUT; 2]> {
+    let (scancode, extended) = match key {
+        "left" => (0x4b, true),
+        "right" => (0x4d, true),
+        "up" => (0x48, true),
+        "down" => (0x50, true),
+        "backspace" => (0x0e, false),
+        "enter" => (0x1c, false),
+        "escape" => (0x01, false),
+        "tab" => (0x0f, false),
+        _ => return None,
+    };
+    let flags = KEYEVENTF_SCANCODE | if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
+    let down = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wScan: scancode, dwFlags: flags, ..Default::default() } },
+    };
+    let mut up = down;
+    unsafe { up.Anonymous.ki.dwFlags |= KEYEVENTF_KEYUP; }
+    Some([down, up])
+}
+
+pub(crate) fn press_key(window: &WebviewWindow, mirror: &Mirror, key: &str) -> Result<(), &'static str> {
+    if !mirror.options.control_enabled { return Err("mirrorActionFailed"); }
+    let inputs = keyboard_inputs(key).ok_or("invalidArguments")?;
+    let host = window.hwnd().map_err(|_| "mirrorFrameFailed")?.0 as HWND;
+    let video = mirror.window();
+    unsafe {
+        if GetForegroundWindow() != host || GetParent(video) != host
+            || IsWindowVisible(video) == 0 || focused_child() != video
+        {
+            return Err("focusDenied");
+        }
+        // 同批提交按下和抬起，保持原始键盘输入的顺序。
+        let sent = SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+        if sent != inputs.len() as u32 {
+            if sent == 1 {
+                // 部分提交时补发抬起，避免留下按住的按键。
+                SendInput(1, &inputs[1], std::mem::size_of::<INPUT>() as i32);
+            }
+            return Err("mirrorActionFailed");
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn drag_window(window: &WebviewWindow, dx: i32, dy: i32) -> Result<(), &'static str> {
@@ -744,6 +815,42 @@ pub(crate) fn click_video(window: &WebviewWindow, mirror: &Mirror, x: i32, y: i3
     Ok(())
 }
 
+pub(crate) fn click_toolbar(window: &WebviewWindow, mirror: &Mirror, x: i32, y: i32) -> Result<(), &'static str> {
+    let host = window.hwnd().map_err(|_| "mirrorFrameFailed")?.0 as HWND;
+    let video = mirror.window();
+    let mut client = RECT::default();
+    let mut point = POINT { x, y };
+    unsafe {
+        if GetClientRect(host, &mut client) == 0 { return Err("mirrorFrameFailed"); }
+        if x < 0 || y < 0 || x >= client.right || y >= client.bottom {
+            return Err("invalidArguments");
+        }
+        if GetForegroundWindow() != host || GetParent(video) != host
+            || ClientToScreen(host, &mut point) == 0
+        {
+            return Err("focusDenied");
+        }
+        let hit = WindowFromPoint(point);
+        if GetAncestor(hit, GA_ROOT) != host || hit == video || IsChild(video, hit) != 0 {
+            return Err("focusDenied");
+        }
+        if SetCursorPos(point.x, point.y) == 0 { return Err("focusDenied"); }
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let mut cursor = POINT::default();
+        let hit = WindowFromPoint(point);
+        if GetCursorPos(&mut cursor) == 0 || cursor.x != point.x || cursor.y != point.y
+            || GetForegroundWindow() != host || GetAncestor(hit, GA_ROOT) != host
+            || hit == video || IsChild(video, hit) != 0
+        {
+            return Err("focusDenied");
+        }
+        if !send_mouse(MOUSEEVENTF_LEFTDOWN) { return Err("mirrorActionFailed"); }
+        std::thread::sleep(std::time::Duration::from_millis(55));
+        if !send_mouse(MOUSEEVENTF_LEFTUP) { return Err("mirrorActionFailed"); }
+    }
+    Ok(())
+}
+
 pub(crate) fn geometry(window: &WebviewWindow, video: HWND) -> Result<serde_json::Value, &'static str> {
     let host = window.hwnd().map_err(|_| "mirrorFrameFailed")?.0 as HWND;
     let mut rect = RECT::default();
@@ -757,9 +864,17 @@ pub(crate) fn geometry(window: &WebviewWindow, video: HWND) -> Result<serde_json
             return Err("mirrorFrameFailed");
         }
         let hit = video_hit(host, (rect.left + rect.right) / 2 - origin.x, (rect.top + rect.bottom) / 2 - origin.y);
+        let focus = focused_child();
+        let focus_target = if focus.is_null() { "none" }
+            else if focus == video { "video" }
+            else if focus == host { "host" }
+            else if IsChild(host, focus) != 0 { "shellChild" }
+            else { "other" };
         Ok(serde_json::json!({
             "videoHit": hit == video,
-            "videoFocused": focused_child() == video,
+            "videoFocused": focus == video,
+            "foregroundHost": GetForegroundWindow() == host,
+            "focusTarget": focus_target,
             "desktopVideoHit": WindowFromPoint(POINT { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 }) == video,
             "video": [rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top],
             "window": [shell.left, shell.top, shell.right - shell.left, shell.bottom - shell.top],
