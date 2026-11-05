@@ -1,5 +1,7 @@
 # 安卓控制台 · 第三版设计
 
+> 本文保留早期设计与效果图。主导航、设备设置、投屏外框和输入实现已随后续迭代调整，当前使用方式见[项目说明](../../../README.md)，验收结果见[覆盖记录](./coverage.md)。
+
 [交互式效果图索引](./gallery.html) · [上游功能覆盖清单](./coverage.md)
 
 面向本地个人使用，沿用 Windows（微软桌面系统）、Tauri（桌面框架）、React（界面组件库）、TypeScript（带类型的编程语言）和 Rust（系统编程语言）。界面参照 Alaya（参考项目）的暗灰紫、雾紫高亮、细边框和文楷字体。截图作为 QtScrcpy（图形化安卓投屏工具）的功能分区参考。其设备列表、启动配置、数据线和无线连接、调试输出，在这里按操作频率和所属对象重新安放。 [参考项目功能说明](https://github.com/barry-ran/QtScrcpy#interface-button-introduction)

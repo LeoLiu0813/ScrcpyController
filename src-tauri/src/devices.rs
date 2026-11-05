@@ -28,6 +28,8 @@ pub struct Sessions(Mutex<HashMap<SessionKey, Session>>);
 
 struct Session {
     child: Child,
+    target: Option<VerifiedTarget>,
+    embedded: bool,
     port_start: u16,
     stopping: bool,
     task: Option<String>,
@@ -57,11 +59,14 @@ impl Drop for Sessions {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Device {
     pub(crate) serial: String,
     pub(crate) model: String,
     pub(crate) connection: &'static str,
     pub(crate) status: &'static str,
+    pub(crate) hardware: Option<String>,
+    pub(crate) transport_id: Option<String>,
     pub(crate) session: &'static str,
     task: Option<String>,
 }
@@ -111,7 +116,10 @@ pub(crate) fn read_devices(engine: &std::path::Path) -> Result<Vec<Device>> {
     if !output.status.success() {
         return Err("adbUnavailable");
     }
-    let output = String::from_utf8_lossy(&output.stdout);
+    parse_devices(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_devices(output: &str) -> Result<Vec<Device>> {
     let (_, rows) = output
         .split_once("List of devices attached")
         .ok_or("adbUnavailable")?;
@@ -128,6 +136,7 @@ pub(crate) fn read_devices(engine: &std::path::Path) -> Result<Vec<Device>> {
                 _ => return None,
             };
             let model = fields
+                .clone()
                 .find_map(|field| field.strip_prefix("model:"))
                 .unwrap_or(serial)
                 .replace('_', " ");
@@ -140,11 +149,119 @@ pub(crate) fn read_devices(engine: &std::path::Path) -> Result<Vec<Device>> {
                     "wired"
                 },
                 status,
+                hardware: None,
+                transport_id: fields.find_map(|field| field.strip_prefix("transport_id:"))
+                    .filter(|id| id.parse::<u64>().is_ok_and(|number| number != 0))
+                    .map(str::to_owned),
                 session: "idle",
                 task: None,
             })
         })
         .collect())
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct VerifiedTarget {
+    hardware: String,
+    transport_id: String,
+}
+
+impl VerifiedTarget {
+    fn from_device(device: &Device) -> Result<Self> {
+        Ok(Self {
+            hardware: device.hardware.clone().ok_or("deviceVerifying")?,
+            transport_id: device.transport_id.clone().ok_or("deviceVerifying")?,
+        })
+    }
+
+    fn check(&self, path: &std::path::Path) -> Result<()> {
+        check_hardware(&self.hardware, &read_hardware(path, &self.transport_id)?)
+    }
+
+    fn adb(&self, path: &std::path::Path) -> Command {
+        adb_transport(path, &self.transport_id)
+    }
+}
+
+fn adb_transport(path: &std::path::Path, transport_id: &str) -> Command {
+    let mut command = Command::new(adb_path(path));
+    command.args(["-t", transport_id]).creation_flags(CREATE_NO_WINDOW).stdin(Stdio::null());
+    command
+}
+
+fn valid_hardware(value: &str) -> bool {
+    (4..=128).contains(&value.len())
+        && !value.eq_ignore_ascii_case("unknown")
+        && value.bytes().any(|byte| byte != b'0')
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+fn read_hardware(path: &std::path::Path, transport_id: &str) -> Result<String> {
+    let mut command = adb_transport(path, transport_id);
+    command.args(["shell", "getprop", "ro.serialno"]);
+    let output = capture_with_timeout(command, None, Duration::from_millis(900))
+        .map_err(|_| "deviceVerifying")?;
+    if !output.success || !valid_hardware(&output.text) {
+        return Err("deviceVerifying");
+    }
+    Ok(output.text)
+}
+
+fn check_hardware(expected: &str, actual: &str) -> Result<()> {
+    if !valid_hardware(expected) || !valid_hardware(actual) { return Err("deviceVerifying"); }
+    (expected == actual).then_some(()).ok_or("deviceIdentityMismatch")
+}
+
+fn confirm_hardware(device: &mut Device, expected: Option<&str>, read: impl FnOnce(&str) -> Result<String>) -> Result<()> {
+    let expected = expected.filter(|hardware| valid_hardware(hardware)).ok_or("deviceVerifying")?;
+    let actual = read(device.transport_id.as_deref().ok_or("deviceVerifying")?)?;
+    check_hardware(expected, &actual)?;
+    device.hardware = Some(actual);
+    Ok(())
+}
+
+fn verify_device_on(app: &AppHandle, path: &std::path::Path, serial: &str, expected: Option<&str>) -> Result<Device> {
+    let mut device = read_devices(path)?.into_iter()
+        .find(|device| device.serial == serial && device.status == "online")
+        .ok_or("deviceUnavailable")?;
+    let configured = expected.is_none().then(|| crate::tray::expected_hardware(app, serial)).flatten();
+    confirm_hardware(&mut device, expected.or(configured.as_deref()), |id| read_hardware(path, id))?;
+    if device.hardware.as_deref().is_some_and(|hardware| crate::tray::is_removed(app, serial, hardware)) {
+        return Err("deviceUnavailable");
+    }
+    Ok(device)
+}
+
+pub(crate) fn verify_device(app: &AppHandle, serial: &str, expected: Option<&str>) -> Result<Device> {
+    verify_device_on(app, &engine(app)?, serial, expected)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::{confirm_hardware, parse_devices};
+
+    #[test]
+    fn reused_endpoint_rejects_the_previous_hardware() {
+        let mut rows = parse_devices("List of devices attached\n192.0.2.2:5555 device model:New_Device transport_id:17\n").unwrap();
+        let replacement = &mut rows[0];
+        let current = |transport: &str| {
+            assert_eq!(transport, "17");
+            Ok("new-phone".to_owned())
+        };
+        assert_eq!(confirm_hardware(replacement, Some("old-phone"), current), Err("deviceIdentityMismatch"));
+        assert!(replacement.hardware.is_none());
+        assert_eq!(confirm_hardware(replacement, Some("new-phone"), current), Ok(()));
+        assert_eq!(replacement.hardware.as_deref(), Some("new-phone"));
+    }
+
+    #[test]
+    fn missing_expected_hardware_or_transport_blocks_verification() {
+        let mut rows = parse_devices("List of devices attached\nexample device model:Phone\n").unwrap();
+        let device = &mut rows[0];
+        assert_eq!(confirm_hardware(device, Some("old-phone"), |_| panic!("missing transport")), Err("deviceVerifying"));
+        device.transport_id = Some("23".to_owned());
+        assert_eq!(confirm_hardware(device, None, |_| panic!("missing hardware")), Err("deviceVerifying"));
+    }
 }
 
 fn session_window(pid: u32) -> Option<HWND> {
@@ -213,17 +330,27 @@ pub(crate) fn tray_devices(app: &AppHandle) -> Result<Vec<Device>> {
 
 fn devices_with_sessions(app: &AppHandle, path: &std::path::Path) -> Result<Vec<Device>> {
         let mut devices = read_devices(path)?;
+        thread::scope(|scope| {
+            for device in devices.iter_mut().filter(|device| device.status == "online") {
+                scope.spawn(move || {
+                    device.hardware = device.transport_id.as_deref().and_then(|id| read_hardware(path, id).ok());
+                });
+            }
+        });
         let state = app.state::<Sessions>();
         let mut sessions = state.0.lock().map_err(|_| "sessionError")?;
         reap(&mut sessions);
         for device in &mut devices {
-            if let Some(session) = sessions.get_mut(&(device.serial.clone(), None)) {
+            if let Some(session) = sessions.get_mut(&(device.serial.clone(), None))
+                && (session.target.is_none() || session.target == VerifiedTarget::from_device(device).ok())
+            {
                 device.task = session.task.clone();
                 device.session = if matches!(session.child.try_wait(), Ok(Some(_))) {
                     "failed"
                 } else if session.stopping {
                     "stopping"
-                } else if session.task.is_some() || session.mirror.is_some() || session_window(session.child.id()).is_some() {
+                } else if session.task.is_some() || session.mirror.is_some()
+                    || (!session.embedded && session_window(session.child.id()).is_some()) {
                     "running"
                 } else {
                     "starting"
@@ -261,14 +388,17 @@ pub(crate) fn shutdown_windows(app: &AppHandle) {
     }
 }
 
-#[tauri::command]
 pub async fn open_device(
     app: AppHandle,
     serial: String,
     alias: Option<String>,
     profile: Option<Profile>,
+    hardware: Option<String>,
 ) -> Result<Option<PathBuf>> {
     tauri::async_runtime::spawn_blocking(move || {
+        let path = engine(&app)?;
+        let device = verify_device_on(&app, &path, &serial, hardware.as_deref())?;
+        let verified = VerifiedTarget::from_device(&device)?;
         let state = app.state::<Sessions>();
         let key = (serial.clone(), None);
         let (pid, title, capture, options) = {
@@ -279,6 +409,7 @@ pub async fn open_device(
                 .get_mut(&key)
                 .and_then(|session| matches!(session.child.try_wait(), Ok(None)).then_some(session))
             {
+                if session.target.as_ref() != Some(&verified) { return Err("deviceIdentityMismatch"); }
                 if session.stopping {
                     return Err("windowPending");
                 }
@@ -289,18 +420,13 @@ pub async fn open_device(
                 drop(sessions);
                 return focus_window(&app, target).map(|()| None);
             }
-            let path = engine(&app)?;
-            let device = read_devices(&path)?
-                .into_iter()
-                .find(|device| device.serial == serial && device.status == "online")
-                .ok_or("deviceUnavailable")?;
             let title = profile::name(alias, device.model)?;
             let mut command = official(&path, &serial);
             command.args(["--window-title", &title]);
             let mut profile = profile.unwrap_or_default();
             if profile.has_crop() {
-                let mut size = Command::new(adb_path(&path));
-                size.args(["-s", &serial, "shell", "wm", "size"]).creation_flags(CREATE_NO_WINDOW);
+                let mut size = verified.adb(&path);
+                size.args(["shell", "wm", "size"]);
                 let size = capture_query(size)?;
                 let (width, height) = size.text.lines().find_map(|line| {
                     let (width, height) = line.strip_prefix("Physical size: ")?.trim().split_once('x')?;
@@ -320,13 +446,15 @@ pub async fn open_device(
             });
             let capture = profile.apply(&mut command, &app, false)?;
             let port_start = session_ports(&sessions, &mut command)?;
+            verified.check(&path)?;
             let mut child = command.spawn().map_err(|_| "launchFailed")?;
             if let Some(options) = &options {
                 options.watch_stats(&mut child);
             }
             let pid = child.id();
             sessions.insert(key.clone(), Session {
-                child, port_start, stopping: false, task: None, display: None, mirror: None, recording: capture.is_some(),
+                child, target: Some(verified), embedded: options.is_some(), port_start, stopping: false,
+                task: None, display: None, mirror: None, recording: capture.is_some(),
             });
             let Some(options) = options else { return Ok(capture); };
             (pid, title, capture, options)
@@ -349,17 +477,33 @@ fn finish_mirror(app: &AppHandle, key: &SessionKey, pid: u32, title: &str, optio
                 sessions.remove(key);
                 return Err("launchFailed");
             }
+            if session.stopping || Instant::now() >= deadline {
+                break Err("launchFailed");
+            }
             if let Some(video) = session_window(pid) {
-                let mirror = match crate::mirror::Mirror::new(video, options.clone(), serde_json::to_string(key).map_err(|_| "sessionError")?) {
+                let Some(target) = session.target.clone() else { break Err("deviceVerifying"); };
+                drop(sessions);
+                // The official child selects by serial. Confirm the same transport again before exposing its window.
+                match verify_device(app, &key.0, Some(&target.hardware)).and_then(|device| VerifiedTarget::from_device(&device)) {
+                    Ok(current) if current == target => {},
+                    Ok(_) => break Err("deviceIdentityMismatch"),
+                    Err(error) => break Err(error),
+                }
+                let mut sessions = state.0.lock().map_err(|_| "sessionError")?;
+                let Some(session) = sessions.get_mut(key).filter(|session| session.child.id() == pid && !session.stopping) else {
+                    break Err("launchFailed");
+                };
+                if !matches!(session.child.try_wait(), Ok(None)) { break Err("launchFailed"); }
+                let placement_key = serde_json::to_string(&(format!("hardware:{}", target.hardware), &key.1))
+                    .map_err(|_| "sessionError")?;
+                let legacy_placement_keys = vec![serde_json::to_string(key).map_err(|_| "sessionError")?];
+                let mirror = match crate::mirror::Mirror::new(video, options.clone(), placement_key, legacy_placement_keys) {
                     Ok(mirror) => mirror,
                     Err(error) => break Err(error),
                 };
                 session.mirror = Some(mirror.clone());
                 drop(sessions);
                 break crate::mirror::create(app, &mirror, title);
-            }
-            if session.stopping || Instant::now() >= deadline {
-                break Err("launchFailed");
             }
             drop(sessions);
             thread::sleep(Duration::from_millis(40));
@@ -377,64 +521,67 @@ fn finish_mirror(app: &AppHandle, key: &SessionKey, pid: u32, title: &str, optio
         Ok(())
 }
 
-fn mirror_session(window: &tauri::WebviewWindow) -> Result<(String, crate::mirror::Mirror)> {
+fn mirror_session(window: &tauri::WebviewWindow) -> Result<(String, crate::mirror::Mirror, VerifiedTarget)> {
     let state = window.state::<Sessions>();
     let sessions = state.0.lock().map_err(|_| "sessionError")?;
     sessions.iter().find_map(|((serial, _), session)| {
         let mirror = session.mirror.as_ref()?;
+        let target = session.target.as_ref()?;
         (mirror.label == window.label() && !session.stopping)
-            .then(|| (serial.clone(), mirror.clone()))
+            .then(|| (serial.clone(), mirror.clone(), target.clone()))
     }).ok_or("windowPending")
 }
 
 #[tauri::command]
-pub fn mirror_info(window: tauri::WebviewWindow) -> Result<(String, i32, i32, String, bool, bool, bool)> {
-    let (serial, mirror) = mirror_session(&window)?;
+pub fn mirror_info(window: tauri::WebviewWindow) -> Result<(String, i32, i32, String, bool, bool, bool, String)> {
+    let (serial, mirror, target) = mirror_session(&window)?;
     let (width, height) = mirror.original_size;
     let state = window.state::<Sessions>();
     let sessions = state.0.lock().map_err(|_| "sessionError")?;
     let recording = !mirror.options.virtual_screen && sessions.get(&(serial.clone(), None))
         .is_some_and(|session| session.recording);
     Ok((window.title().map_err(|_| "mirrorFrameFailed")?, width, height, serial,
-        mirror.options.virtual_screen, mirror.options.follow, recording))
+        mirror.options.virtual_screen, mirror.options.follow, recording, target.hardware))
 }
 
 #[tauri::command]
-pub async fn lock_device(app: AppHandle, serial: String) -> Result<()> {
+pub async fn lock_device(app: AppHandle, serial: String, hardware: Option<String>) -> Result<()> {
     tauri::async_runtime::spawn_blocking(move || {
-        require_online(&app, &serial)?;
-        mirror_phone_command(&app, &serial, &["input", "-d", "0", "keyevent", "KEYCODE_SLEEP"])?;
+        let path = engine(&app)?;
+        let device = verify_device_on(&app, &path, &serial, hardware.as_deref())?;
+        let target = VerifiedTarget::from_device(&device)?;
+        mirror_phone_command(&path, &target, &["input", "-d", "0", "keyevent", "KEYCODE_SLEEP"])?;
         Ok(())
     }).await.map_err(|_| "mirrorActionFailed")?
 }
 
 #[tauri::command]
 pub fn mirror_stats(window: tauri::WebviewWindow) -> Result<(Option<u32>, Option<[u16; 2]>)> {
-    let (_, mirror) = mirror_session(&window)?;
+    let (_, mirror, _) = mirror_session(&window)?;
     Ok(mirror.options.stats())
 }
 
 #[tauri::command]
 pub async fn mirror_prepare_input(window: tauri::WebviewWindow) -> Result<bool> {
-    let (_, mirror) = mirror_session(&window)?;
+    let (_, mirror, _) = mirror_session(&window)?;
     crate::mirror::prepare_input(window, mirror.video).await
 }
 
 #[tauri::command]
 pub fn mirror_save_placement(window: tauri::WebviewWindow) -> Result<()> {
-    let (_, mirror) = mirror_session(&window)?;
+    let (_, mirror, _) = mirror_session(&window)?;
     crate::mirror::save_placement(&window, &mirror)
 }
 
 #[tauri::command]
 pub fn mirror_position(window: tauri::WebviewWindow, bounds: crate::mirror::VideoBounds) -> Result<()> {
-    let (_, mirror) = mirror_session(&window)?;
+    let (_, mirror, _) = mirror_session(&window)?;
     crate::mirror::position(&window, &mirror, bounds)
 }
 
 #[tauri::command]
 pub async fn mirror_action(window: tauri::WebviewWindow, action: String) -> Result<Option<PathBuf>> {
-    let (serial, mirror) = mirror_session(&window)?;
+    let (serial, mirror, target) = mirror_session(&window)?;
     let video = mirror.video;
     if !mirror.options.control_enabled && matches!(action.as_str(),
         "back" | "home" | "recents" | "volumeUp" | "volumeDown" | "screenPower" |
@@ -444,13 +591,16 @@ pub async fn mirror_action(window: tauri::WebviewWindow, action: String) -> Resu
     let app = window.app_handle().clone();
     let owner = window.hwnd().map_err(|_| "mirrorFrameFailed")?.0 as usize;
     let virtual_screen = mirror.options.virtual_screen;
-    if action == "sendFiles" && !virtual_screen {
-        use tauri::Emitter;
-        crate::tray::show(&app)?;
-        app.emit_to("main", "open-file-tools", serial).map_err(|_| "mirrorActionFailed")?;
-        return Ok(None);
-    }
     tauri::async_runtime::spawn_blocking(move || {
+        if action == "sendFiles" && !virtual_screen {
+            use tauri::Emitter;
+            target.check(&engine(&app)?)?;
+            if crate::tray::is_removed(&app, &serial, &target.hardware) { return Err("deviceUnavailable"); }
+            crate::tray::show(&app)?;
+            app.emit_to("main", "open-file-tools", serde_json::json!({"serial": serial, "hardware": target.hardware}))
+                .map_err(|_| "mirrorActionFailed")?;
+            return Ok(None);
+        }
         let key = match action.as_str() {
             "back" => Some("KEYCODE_BACK"),
             "home" => Some("KEYCODE_HOME"),
@@ -461,11 +611,15 @@ pub async fn mirror_action(window: tauri::WebviewWindow, action: String) -> Resu
             _ => None,
         };
         if !virtual_screen && let Some(key) = key {
-            return mirror_phone_command(&app, &serial, &["input", "-d", "0", "keyevent", key]);
+            let path = engine(&app)?;
+            target.check(&path)?;
+            return mirror_phone_command(&path, &target, &["input", "-d", "0", "keyevent", key]);
         }
         if !virtual_screen && matches!(action.as_str(), "notifications" | "quickSettings") {
             let operation = if action == "notifications" { "expand-notifications" } else { "expand-settings" };
-            return mirror_phone_command(&app, &serial, &["cmd", "statusbar", operation]);
+            let path = engine(&app)?;
+            target.check(&path)?;
+            return mirror_phone_command(&path, &target, &["cmd", "statusbar", operation]);
         }
         let video = video as HWND;
         let shortcut = match action.as_str() {
@@ -483,7 +637,7 @@ pub async fn mirror_action(window: tauri::WebviewWindow, action: String) -> Resu
             "resetVideo" => (0x52, 0x13, true, false),
             "screenshot" | "copyScreenshot" if virtual_screen => return Err("captureUnavailable"),
             "screenshot" | "copyScreenshot" | "captureFolder" => {
-                return mirror_capture(&app, &serial, &action, owner as HWND);
+                return mirror_capture(&app, &target, &action, owner as HWND);
             }
             _ => return Err("mirrorActionFailed"),
         };
@@ -492,9 +646,9 @@ pub async fn mirror_action(window: tauri::WebviewWindow, action: String) -> Resu
     }).await.map_err(|_| "mirrorActionFailed")?
 }
 
-fn mirror_phone_command(app: &AppHandle, serial: &str, args: &[&str]) -> Result<Option<PathBuf>> {
-    let mut command = Command::new(adb_path(&engine(app)?));
-    command.args(["-s", serial, "shell"]).args(args).creation_flags(CREATE_NO_WINDOW);
+fn mirror_phone_command(path: &std::path::Path, target: &VerifiedTarget, args: &[&str]) -> Result<Option<PathBuf>> {
+    let mut command = target.adb(path);
+    command.arg("shell").args(args);
     if !capture_command(command, None)?.success {
         return Err("mirrorActionFailed");
     }
@@ -521,25 +675,28 @@ fn cli_session_window(app: &AppHandle, key: SessionKey) -> Result<tauri::Webview
 }
 
 pub(crate) fn cli_click_video(window: &tauri::WebviewWindow, x: i32, y: i32) -> Result<()> {
-    let (_, mirror) = mirror_session(window)?;
+    let (_, mirror, target) = mirror_session(window)?;
+    target.check(&engine(window.app_handle())?)?;
     crate::mirror::click_video(window, &mirror, x, y)
 }
 
 pub(crate) fn cli_video_geometry(window: &tauri::WebviewWindow) -> Result<serde_json::Value> {
-    let (_, mirror) = mirror_session(window)?;
+    let (_, mirror, _) = mirror_session(window)?;
     let mut geometry = crate::mirror::geometry(window, mirror.window())?;
     geometry["startupPosition"] = serde_json::json!(mirror.startup_position);
     Ok(geometry)
 }
 
-fn mirror_capture(app: &AppHandle, serial: &str, action: &str, owner: HWND) -> Result<Option<PathBuf>> {
+fn mirror_capture(app: &AppHandle, target: &VerifiedTarget, action: &str, owner: HWND) -> Result<Option<PathBuf>> {
     let file = profile::recording(app)?.with_extension("png");
     let folder = file.parent().ok_or("captureUnavailable")?;
     if action == "captureFolder" {
         Command::new("explorer.exe").arg(folder).spawn().map_err(|_| "captureUnavailable")?;
         return Ok(None);
     }
-    let bytes = phone_screenshot(app, serial)?;
+    let path = engine(app)?;
+    target.check(&path)?;
+    let bytes = phone_screenshot(&path, target)?;
     if action == "copyScreenshot" {
         return crate::mirror::copy_png(owner, &bytes).map(|()| None);
     }
@@ -548,10 +705,11 @@ fn mirror_capture(app: &AppHandle, serial: &str, action: &str, owner: HWND) -> R
 }
 
 #[tauri::command]
-pub async fn capture_crop_preview(app: AppHandle, serial: String) -> Result<tauri::ipc::Response> {
+pub async fn capture_crop_preview(app: AppHandle, serial: String, hardware: Option<String>) -> Result<tauri::ipc::Response> {
     tauri::async_runtime::spawn_blocking(move || {
-        require_online(&app, &serial)?;
-        phone_screenshot(&app, &serial).map(tauri::ipc::Response::new)
+        let path = engine(&app)?;
+        let device = verify_device_on(&app, &path, &serial, hardware.as_deref())?;
+        phone_screenshot(&path, &VerifiedTarget::from_device(&device)?).map(tauri::ipc::Response::new)
     }).await.map_err(|_| "captureUnavailable")?
 }
 
@@ -563,11 +721,9 @@ pub fn reveal_capture(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn phone_screenshot(app: &AppHandle, serial: &str) -> Result<Vec<u8>> {
-    let path = engine(app)?;
-    let output = Command::new(adb_path(&path))
-        .args(["-s", serial, "exec-out", "screencap", "-p"])
-        .creation_flags(CREATE_NO_WINDOW)
+fn phone_screenshot(path: &std::path::Path, target: &VerifiedTarget) -> Result<Vec<u8>> {
+    let output = target.adb(path)
+        .args(["exec-out", "screencap", "-p"])
         .output().map_err(|_| "captureUnavailable")?;
     if !output.status.success() || png_size(&output.stdout).is_none() {
         return Err("captureUnavailable");
@@ -584,14 +740,8 @@ fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
     (width > 0 && height > 0).then_some((width, height))
 }
 
-fn require_online(app: &AppHandle, serial: &str) -> Result<()> {
-    read_devices(&engine(app)?)?.iter()
-        .any(|device| device.serial == serial && device.status == "online")
-        .then_some(()).ok_or("deviceUnavailable")
-}
-
 fn focus_target(session: &Session) -> Result<(u32, Option<String>)> {
-    if session.stopping {
+    if session.stopping || (session.embedded && session.mirror.is_none()) {
         return Err("windowPending");
     }
     if session.task.is_some() {
@@ -620,9 +770,11 @@ fn focus_window(app: &AppHandle, (pid, label): (u32, Option<String>)) -> Result<
 
 pub async fn cli_focus(app: AppHandle, serial: String) -> Result<()> {
     tauri::async_runtime::spawn_blocking(move || {
+        let verified = VerifiedTarget::from_device(&verify_device(&app, &serial, None)?)?;
         let state = app.state::<Sessions>();
         let mut sessions = state.0.lock().map_err(|_| "sessionError")?;
         let session = sessions.get_mut(&(serial, None)).ok_or("sessionNotFound")?;
+        if session.target.as_ref() != Some(&verified) { return Err("deviceIdentityMismatch"); }
         if !matches!(session.child.try_wait(), Ok(None)) || session.stopping {
             return Err("sessionNotFound");
         }
@@ -652,8 +804,9 @@ pub async fn cli_close(app: AppHandle, serial: String) -> Result<()> {
 
 pub async fn cli_screenshot(app: AppHandle, serial: String) -> Result<(PathBuf, u32, u32)> {
     tauri::async_runtime::spawn_blocking(move || {
-        require_online(&app, &serial)?;
-        let bytes = phone_screenshot(&app, &serial)?;
+        let path = engine(&app)?;
+        let target = VerifiedTarget::from_device(&verify_device_on(&app, &path, &serial, None)?)?;
+        let bytes = phone_screenshot(&path, &target)?;
         let (width, height) = png_size(&bytes).ok_or("captureUnavailable")?;
         let file = profile::recording(&app)?.with_extension("png");
         std::fs::write(&file, bytes).map_err(|_| "captureUnavailable")?;
@@ -666,15 +819,16 @@ pub async fn cli_tap(app: AppHandle, serial: String, x: u32, y: u32, width: u32,
         return Err("invalidCoordinates");
     }
     tauri::async_runtime::spawn_blocking(move || {
-        require_online(&app, &serial)?;
-        let bytes = phone_screenshot(&app, &serial)?;
+        let hardware = crate::tray::input_hardware(&app, &serial).ok_or("mirrorActionFailed")?;
+        let path = engine(&app)?;
+        let target = VerifiedTarget::from_device(&verify_device_on(&app, &path, &serial, Some(&hardware))?)?;
+        let bytes = phone_screenshot(&path, &target)?;
         if png_size(&bytes) != Some((width, height)) {
             return Err("screenSizeChanged");
         }
-        let path = engine(&app)?;
-        let mut command = Command::new(adb_path(&path));
-        command.args(["-s", &serial, "shell", "input", "-d", "0", "tap", &x.to_string(), &y.to_string()])
-            .creation_flags(CREATE_NO_WINDOW);
+        target.check(&path)?;
+        let mut command = target.adb(&path);
+        command.args(["shell", "input", "-d", "0", "tap", &x.to_string(), &y.to_string()]);
         if !capture_command(command, None)?.success {
             return Err("mirrorActionFailed");
         }
@@ -749,20 +903,18 @@ pub async fn run_tool(
     format: Option<String>,
     audio_source: Option<String>,
     profile: Option<Profile>,
+    hardware: Option<String>,
 ) -> Result<Option<PathBuf>> {
     if task == "cameraMirror" {
-        let alias = crate::tray::configured_name(&app, &serial);
-        return open_device(app, serial, alias, Some(profile.unwrap_or_default().for_camera())).await;
+        let alias = crate::tray::configured_name(&app, &serial, hardware.as_deref());
+        return open_device(app, serial, alias, Some(profile.unwrap_or_default().for_camera()), hardware).await;
     }
     tauri::async_runtime::spawn_blocking(move || {
         if !(3..=300).contains(&seconds) {
             return Err("invalidDuration");
         }
-        let state = app.state::<Sessions>();
-        let mut sessions = state.0.lock().map_err(|_| "sessionError")?;
-            if crate::tray::quitting(&app) { return Err("sessionError"); }
         let path = engine(&app)?;
-        if task == "directControl" {
+        let target = if task == "directControl" {
             if serial.is_empty()
                 || serial.len() > 128
                 || serial.contains(':')
@@ -771,12 +923,14 @@ pub async fn run_tool(
             {
                 return Err("wiredRequired");
             }
-        } else if !read_devices(&path)?
-            .into_iter()
-            .any(|device| device.serial == serial && device.status == "online")
-        {
-            return Err("deviceUnavailable");
-        }
+            // This mode explicitly targets the wired USB serial without an ADB connection.
+            None
+        } else {
+            Some(VerifiedTarget::from_device(&verify_device_on(&app, &path, &serial, hardware.as_deref())?)?)
+        };
+        let state = app.state::<Sessions>();
+        let mut sessions = state.0.lock().map_err(|_| "sessionError")?;
+        if crate::tray::quitting(&app) { return Err("sessionError"); }
         let mut command = official(&path, &serial);
         let mut capture = None;
         match task.as_str() {
@@ -835,11 +989,14 @@ pub async fn run_tool(
             }
         }
         let port_start = session_ports(&sessions, &mut command)?;
+        if let Some(target) = &target { target.check(&path)?; }
         let child = command.spawn().map_err(|_| "launchFailed")?;
         sessions.insert(
             (serial, None),
             Session {
                 child,
+                target,
+                embedded: false,
                 port_start,
                 stopping: false,
                 task: Some(task),
@@ -878,24 +1035,25 @@ pub struct FileResult {
 #[tauri::command]
 pub async fn transfer_files(
     app: AppHandle, serial: String, files: Vec<PathBuf>, target: String, install: bool,
+    hardware: Option<String>,
 ) -> Result<Vec<FileResult>> {
     tauri::async_runtime::spawn_blocking(move || {
-        require_online(&app, &serial)?;
         if files.is_empty() || files.len() > 32 || !install && !profile::android_folder(&target) {
             return Err("invalidPushTarget");
         }
-        let adb = adb_path(&engine(&app)?);
+        let engine_path = engine(&app)?;
+        let device = verify_device_on(&app, &engine_path, &serial, hardware.as_deref())?;
+        let verified = VerifiedTarget::from_device(&device)?;
         Ok(files.into_iter().map(|path| {
             let is_apk = path.extension().and_then(|value| value.to_str())
                 .is_some_and(|value| value.eq_ignore_ascii_case("apk"));
-            let mut command = Command::new(&adb);
-            command.args(["-s", &serial]).creation_flags(CREATE_NO_WINDOW).stdin(Stdio::null());
+            let mut command = verified.adb(&engine_path);
             let output = if !path.is_absolute() || !path.is_file() || (install && !is_apk) {
                 Err("invalidLocalPath")
             } else {
                 if install { command.arg("install").arg(&path); }
                 else { command.arg("push").arg(&path).arg(&target); }
-                capture_with_timeout(command, None, Duration::from_secs(300))
+                verified.check(&engine_path).and_then(|()| capture_with_timeout(command, None, Duration::from_secs(300)))
             };
             let (success, detail) = match output {
                 Ok(output) => (output.success, output.text),
@@ -913,13 +1071,10 @@ pub struct QueryOutput {
 }
 
 #[tauri::command]
-pub async fn query_device(app: AppHandle, serial: String, query: String) -> Result<QueryOutput> {
+pub async fn query_device(app: AppHandle, serial: String, query: String, hardware: Option<String>) -> Result<QueryOutput> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = engine(&app)?;
-        let device = read_devices(&path)?
-            .into_iter()
-            .find(|device| device.serial == serial && device.status == "online")
-            .ok_or("deviceUnavailable")?;
+        let device = verify_device_on(&app, &path, &serial, hardware.as_deref())?;
         let mut command = official(&path, &serial);
         if query == "diagnostics" {
             return Ok(QueryOutput {
@@ -928,16 +1083,11 @@ pub async fn query_device(app: AppHandle, serial: String, query: String) -> Resu
             });
         }
         if query == "deviceFacts" {
-            command = Command::new(adb_path(&path));
-            command
-                .args([
-                    "-s",
-                    &serial,
+            command = VerifiedTarget::from_device(&device)?.adb(&path);
+            command.args([
                     "shell",
                     "getprop ro.product.manufacturer; wm size; printf '\\ncontroller-serial:'; getprop ro.serialno; printf 'controller-sdk:'; getprop ro.build.version.sdk",
-                ])
-                .creation_flags(CREATE_NO_WINDOW)
-                .stdin(Stdio::null());
+                ]);
         } else {
             let flag = match query.as_str() {
                 "encoders" => "--list-encoders",
@@ -971,8 +1121,8 @@ fn valid_package(package: &str) -> bool {
 }
 
 #[tauri::command]
-pub async fn list_apps(app: AppHandle, serial: String) -> Result<Vec<PhoneApp>> {
-    let output = query_device(app, serial, "apps".into()).await?;
+pub async fn list_apps(app: AppHandle, serial: String, hardware: Option<String>) -> Result<Vec<PhoneApp>> {
+    let output = query_device(app, serial, "apps".into(), hardware).await?;
     if !output.success {
         return Err("queryFailed");
     }
@@ -1000,17 +1150,19 @@ pub async fn open_app_window(
     package: String,
     title: String,
     display: AppDisplay,
+    hardware: Option<String>,
 ) -> Result<()> {
     tauri::async_runtime::spawn_blocking(move || {
         if !valid_package(&package) {
             return Err("appWindowFailed");
         }
+        let path = engine(&app)?;
+        let verified = VerifiedTarget::from_device(&verify_device_on(&app, &path, &serial, hardware.as_deref())?)?;
         let key = (serial.clone(), Some(package.clone()));
         let state = app.state::<Sessions>();
         let (pid, title, options, _douyin_server, _wechat_server) = {
             let mut sessions = state.0.lock().map_err(|_| "sessionError")?;
             if crate::tray::quitting(&app) { return Err("sessionError"); }
-            let path = engine(&app)?;
             let mut command = official(&path, &serial);
             let douyin = package == "com.ss.android.ugc.aweme";
             match display {
@@ -1038,14 +1190,9 @@ pub async fn open_app_window(
             if douyin {
                 command.arg("--keep-active");
             }
-            if !read_devices(&path)?
-                .iter()
-                .any(|device| device.serial == serial && device.status == "online")
-            {
-                return Err("deviceUnavailable");
-            }
             reap(&mut sessions);
             if let Some(session) = sessions.get(&key) {
+                if session.target.as_ref() != Some(&verified) { return Err("deviceIdentityMismatch"); }
                 if session.display != Some(display) {
                     return Err("reopenAppWindow");
                 }
@@ -1072,6 +1219,7 @@ pub async fn open_app_window(
             let options = crate::mirror::MirrorOptions::prepare(
                 &mut command, false, false, true, true, display == AppDisplay::Follow,
             );
+            verified.check(&path)?;
             let mut child = command
                 .arg("--start-app").arg(&package).arg("--window-title").arg(&title)
                 .spawn().map_err(|_| "appWindowFailed")?;
@@ -1081,6 +1229,8 @@ pub async fn open_app_window(
                 key.clone(),
                 Session {
                     child,
+                    target: Some(verified),
+                    embedded: true,
                     port_start,
                     stopping: false,
                     task: None,
@@ -1182,23 +1332,20 @@ fn capture_with_timeout(mut command: Command, input: Option<&str>, timeout: Dura
 }
 
 #[tauri::command]
-pub async fn app_icon(app: AppHandle, serial: String, package: String) -> Result<String> {
+pub async fn app_icon(app: AppHandle, serial: String, package: String, hardware: Option<String>) -> Result<String> {
     tauri::async_runtime::spawn_blocking(move || {
         if !valid_package(&package) {
             return Err("queryFailed");
         }
         let path = engine(&app)?;
+        let target = VerifiedTarget::from_device(&verify_device_on(&app, &path, &serial, hardware.as_deref())?)?;
         let token = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).map_err(|_| "queryFailed")?.as_nanos();
         let token = format!("{}-{token}", std::process::id());
         let local = std::env::temp_dir().join(format!("scrcpy-controller-icon-{token}.jar"));
         let remote_helper = format!("/data/local/tmp/scrcpy-controller-icon-{token}.jar");
         let remote_server = format!("/data/local/tmp/scrcpy-controller-server-{token}.jar");
-        let adb = || {
-            let mut command = Command::new(adb_path(&path));
-            command.args(["-s", &serial]).creation_flags(CREATE_NO_WINDOW).stdin(Stdio::null());
-            command
-        };
+        let adb = || target.adb(&path);
         std::fs::write(&local, include_bytes!("../android-helper/icons.jar")).map_err(|_| "queryFailed")?;
         let result = (|| {
             let mut push = adb();
@@ -1227,9 +1374,11 @@ pub async fn app_icon(app: AppHandle, serial: String, package: String) -> Result
             Ok(format!("data:image/png;base64,{icon}"))
         })();
         let _ = std::fs::remove_file(&local);
-        let mut cleanup = adb();
-        cleanup.args(["shell", "rm", "-f", &remote_helper, &remote_server]);
-        let _ = capture_query(cleanup);
+        if target.check(&path).is_ok() {
+            let mut cleanup = adb();
+            cleanup.args(["shell", "rm", "-f", &remote_helper, &remote_server]);
+            let _ = capture_query(cleanup);
+        }
         result
     }).await.map_err(|_| "queryFailed")?
 }

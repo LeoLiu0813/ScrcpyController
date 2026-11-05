@@ -8,13 +8,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getInitialLocale, locales, type Locale, type Message } from "./locales";
-import { deviceStorageKey, bindAlias, legacyDeviceKeys } from "./deviceAliases";
+import { currentDeviceKey, deviceStorageKey, bindDeviceRecord, legacyDeviceKeys, verifiedDeviceBinding } from "./deviceAliases";
 import { AppWindowPanel, bindDeviceApps, defaultProfile, loadMap, ProfileEditor, ToolPanel, toolSections, type Device, type Profile, type ToolSection } from "./Workflows";
 import ConnectionDialog from "./ConnectionDialog";
 import { MirrorAppearance } from "./MirrorWindow";
 import ErrorToast from "./ErrorToast";
 import EngineUpdate from "./EngineUpdate";
 import LaunchArgumentsEditor from "./LaunchArgumentsEditor";
+import { saveLocalStorage } from "./localStorage";
 import "./App.css";
 
 const icons = {
@@ -36,7 +37,8 @@ const brands = ["generic", "oneplus", "xiaomi", "google", "samsung"] as const;
 type Brand = typeof brands[number];
 type Mark = { brand: Brand | "auto"; badge: string };
 const defaultMark: Mark = { brand: "auto", badge: "" };
-type DeviceFacts = { brand: Brand; manufacturer: string; size?: [number, number]; sdk?: number };
+type DeviceFacts = { hardware: string; transportId: Device["transportId"]; brand: Brand; manufacturer: string; size?: [number, number]; sdk?: number };
+type DeviceBrand = Pick<DeviceFacts, "brand" | "manufacturer">;
 type KnownDevice = Pick<Device, "serial" | "model" | "connection">;
 const resizeEdges = ["North", "South", "East", "West", "NorthEast", "NorthWest", "SouthEast", "SouthWest"] as const;
 
@@ -47,6 +49,42 @@ function readSerials(key: string): string[] {
   } catch {
     return [];
   }
+}
+
+function sameConnection(first: Pick<Device, "hardware" | "transportId">, second?: Pick<Device, "hardware" | "transportId">) {
+  return !!second && first.hardware === second.hardware && first.transportId === second.transportId;
+}
+
+function readMarks() {
+  if (localStorage.getItem("device-marks-v2")) return loadMap<Mark>("device-marks-v2");
+  return Object.fromEntries(Object.entries(loadMap<Mark>("device-marks"))
+    .map(([serial, mark]) => [serial, { ...defaultMark, badge: mark.badge }]));
+}
+
+function migrateDeviceBindings(devices: Device[]) {
+  const identities = loadMap<string>("device-identities");
+  const aliases = loadMap<string>("device-aliases");
+  const profiles = loadMap<Profile>("device-profiles");
+  const marks = readMarks();
+  let updatedAliases = aliases, updatedProfiles = profiles, updatedMarks = marks, changedIdentity = false;
+  for (const { serial, hardware } of devices) {
+    if (!hardware) continue;
+    changedIdentity ||= identities[serial] !== hardware;
+    verifiedDeviceBinding(serial, hardware, identities, (endpoint, id, bindings) => {
+      updatedAliases = bindDeviceRecord(endpoint, id, bindings, updatedAliases);
+      updatedProfiles = bindDeviceRecord(endpoint, id, bindings, updatedProfiles);
+      updatedMarks = bindDeviceRecord(endpoint, id, bindings, updatedMarks);
+      bindDeviceApps(endpoint, id, bindings);
+    });
+  }
+  if (updatedAliases !== aliases) saveLocalStorage("device-aliases", JSON.stringify(updatedAliases));
+  if (updatedProfiles !== profiles) saveLocalStorage("device-profiles", JSON.stringify(updatedProfiles));
+  if (updatedMarks !== marks) saveLocalStorage("device-marks-v2", JSON.stringify(updatedMarks));
+  if (changedIdentity) saveLocalStorage("device-identities", JSON.stringify(identities));
+  return { identities: changedIdentity ? identities : undefined,
+    aliases: updatedAliases !== aliases ? updatedAliases : undefined,
+    profiles: updatedProfiles !== profiles ? updatedProfiles : undefined,
+    marks: updatedMarks !== marks ? updatedMarks : undefined };
 }
 
 function opacity(key: string, fallback: number) {
@@ -100,32 +138,34 @@ export default function App() {
   const deviceSettingsBody = useRef<HTMLDivElement>(null);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [devices, setDevices] = useState<Device[]>([]);
+  const liveDevices = useRef(new Map<string, Device>());
   const [known, setKnown] = useState(() => loadMap<KnownDevice>("known-devices"));
   const [order, setOrder] = useState(() => readSerials("device-order"));
-  const [removed, setRemoved] = useState(() => readSerials("removed-devices"));
+  const [removed, setRemoved] = useState(() => {
+    const ids = loadMap<string>("device-identities");
+    return [...new Set(readSerials("removed-devices").map((key) => deviceStorageKey(key, ids)))];
+  });
   const removedRef = useRef(new Set(removed));
   const [bulk, setBulk] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(() => new Set());
-  const [deleteRequest, setDeleteRequest] = useState<string[]>();
+  const [deleteRequest, setDeleteRequest] = useState<{ serial: string; key: string }[]>();
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<Message>();
   const [actionError, setActionError] = useState<Message>();
   const [pending, setPending] = useState<Set<string>>(() => new Set());
   const [aliases, setAliases] = useState(() => loadMap<string>("device-aliases"));
-  const pendingAliasEdits = useRef(new Map<string, string>());
   const [identities, setIdentities] = useState(() => loadMap<string>("device-identities"));
   const [profiles, setProfiles] = useState(() => loadMap<Profile>("device-profiles"));
   const [selected, setSelected] = useState(() => localStorage.getItem("selected-device") ?? "");
   const selection = useRef(selected);
-  const [marks, setMarks] = useState(() => {
-    if (localStorage.getItem("device-marks-v2")) return loadMap<Mark>("device-marks-v2");
-    return Object.fromEntries(Object.entries(loadMap<Mark>("device-marks"))
-      .map(([serial, mark]) => [serial, { ...defaultMark, badge: mark.badge }]));
-  });
+  const selectedHardware = useRef<string | undefined>(identities[selected]);
+  const requireSelection = useRef(false);
+  const [marks, setMarks] = useState(readMarks);
   const [facts, setFacts] = useState<Record<string, DeviceFacts>>({});
+  const [deviceBrands, setDeviceBrands] = useState(() => loadMap<DeviceBrand>("device-brands"));
   const factRequests = useRef(new Set<string>());
   const [phoneMenu, setPhoneMenu] = useState(false);
-  const [editing, setEditing] = useState<{ serial: string; value: string; originalName: string } & Mark>();
+  const [editing, setEditing] = useState<{ serial: string; key: string; value: string; originalName: string } & Mark>();
   const [dragging, setDragging] = useState<string>();
   const [dropTarget, setDropTarget] = useState<string>();
   const [windowOpacity, setWindowOpacity] = useState(() => opacity("window-opacity", 88));
@@ -138,25 +178,75 @@ export default function App() {
   const merged = new Map<string, Device>(Object.values(known).map((device) => [
     device.serial, { ...device, status: "offline", session: "idle" },
   ]));
+  const live = new Map(devices.map((device) => [device.serial, device]));
   for (const device of devices) merged.set(device.serial, device);
-  for (const serial of removed) merged.delete(serial);
-  const hiddenDevices = devices.filter((device) => removedRef.current.has(device.serial));
-  const ordered = [...new Set([...order, ...merged.keys()])]
+  for (const [serial, device] of merged) if (isRemoved(device)) merged.delete(serial);
+  const hiddenDevices = devices.filter((device) => device.hardware && isRemoved(device));
+  const connectionOrder = [...new Set([...order, ...merged.keys()])]
     .flatMap((serial) => { const device = merged.get(serial); return device ? [device] : []; });
-  const target = selected ? merged.get(selected) : undefined;
+  const displayedDevices = new Map<string, Device>();
+  for (const device of connectionOrder) {
+    const key = displayKey(device);
+    const previous = displayedDevices.get(key);
+    if (!previous || displayPriority(device) > displayPriority(previous)) displayedDevices.set(key, device);
+  }
+  const ordered = [...displayedDevices.values()];
+  const requestedTarget = selected ? merged.get(selected) : undefined;
+  const selectedKey = requestedTarget ? displayKey(requestedTarget)
+    : selectedHardware.current ? `hardware:${selectedHardware.current}` : undefined;
+  const target = selectedKey ? displayedDevices.get(selectedKey) : undefined;
   const nativeWindow = getCurrentWindow();
   const windowStyle = { "--window-opacity": `${windowOpacity}%`, "--panel-opacity": `${panelOpacity}%` } as CSSProperties;
-  const configured = profileSerial ? merged.get(profileSerial) : undefined;
+  const configuring = profileSerial ? merged.get(profileSerial) : undefined;
+  const configured = configuring && editing && keyFor(configuring.serial) === editing.key ? configuring : undefined;
   const currentProfile = configured ? profileFor(configured.serial) : defaultProfile;
-  const appDeviceKey = target && deviceStorageKey(target.serial, identities);
+  const appDeviceKey = target && keyFor(target.serial);
   const currentTitle = target ? deviceName(target) : "";
 
-  function profileFor(serial: string): Profile {
+  function keyFor(serial: string) {
+    return currentDeviceKey(serial, live.get(serial), identities);
+  }
+
+  function displayKey(device: Device) {
+    const hardware = device.hardware ?? (device.status !== "online" ? identities[device.serial] : undefined);
+    return hardware ? `hardware:${hardware}` : device.serial;
+  }
+
+  function displayPriority(device: Device) {
+    const active = ["starting", "running", "stopping"].includes(device.session);
+    return Number(active) * 4 + Number(device.status === "online") * 2 + Number(device.serial === selected);
+  }
+
+  function persistSetting(key: string, value: string) {
+    try { saveLocalStorage(key, value); return true; }
+    catch (error) { setActionError(errorKey(error)); return false; }
+  }
+
+  function isRemoved(device: Device) {
+    const key = keyFor(device.serial);
+    return (key && removed.includes(key)) || removed.includes(device.serial);
+  }
+
+  function usable(device?: Device) {
+    return !listError && device?.status === "online" && !!device.hardware;
+  }
+
+  function statusLabel(device: Device) {
+    return t(device.status === "online" && !device.hardware ? "deviceVerifying" : device.status);
+  }
+
+  function deviceValue<T>(serial: string, values: Record<string, T>): T | undefined {
+    const key = keyFor(serial);
+    if (!key) return undefined;
+    if (live.has(serial) || values[key] !== undefined) return values[key];
     const hardware = identities[serial];
-    const key = deviceStorageKey(serial, identities);
-    const legacy = hardware && legacyDeviceKeys(serial, hardware, identities, Object.keys(profiles))
-      .find((candidate) => profiles[candidate]);
-    const saved = profiles[key] ?? (legacy ? profiles[legacy] : undefined);
+    const legacy = hardware && legacyDeviceKeys(serial, hardware, identities, Object.keys(values))
+      .find((candidate) => values[candidate] !== undefined);
+    return legacy ? values[legacy] : undefined;
+  }
+
+  function profileFor(serial: string): Profile {
+    const saved = deviceValue(serial, profiles);
     return saved ? { ...defaultProfile, ...saved } : defaultProfile;
   }
 
@@ -165,7 +255,7 @@ export default function App() {
   }
 
   function deviceAlias(serial: string) {
-    return aliases[deviceStorageKey(serial, identities)];
+    return deviceValue(serial, aliases);
   }
 
   function deviceName(device: Device) {
@@ -173,45 +263,60 @@ export default function App() {
   }
 
   function canDelete(device: Device) {
-    return !pending.has(device.serial) && ["idle", "failed"].includes(device.session);
+    const key = keyFor(device.serial);
+    return !!key && [...merged.values()].every((entry) => keyFor(entry.serial) !== key ||
+      (!pending.has(entry.serial) && ["idle", "failed"].includes(entry.session)));
   }
 
   function setRemovedDevices(next: string[]) {
-    localStorage.setItem("removed-devices", JSON.stringify(next));
+    if (!persistSetting("removed-devices", JSON.stringify(next))) return false;
     removedRef.current = new Set(next);
     setRemoved(next);
+    return true;
   }
 
-  function restoreDevice(serial: string) {
-    if (!removedRef.current.has(serial)) return;
-    setRemovedDevices([...removedRef.current].filter((entry) => entry !== serial));
-    void refresh();
+  async function restoreDevice(serial: string, expectedHardware?: string) {
+    if (refreshing.current) await refreshing.current;
+    await refresh();
+    const hardware = liveDevices.current.get(serial)?.hardware;
+    if (!hardware || (expectedHardware && hardware !== expectedHardware)) return false;
+    const key = `hardware:${hardware}`;
+    if (removedRef.current.has(serial) || removedRef.current.has(key)) {
+      if (!setRemovedDevices([...removedRef.current].filter((entry) => entry !== serial && entry !== key))) return false;
+    }
+    return true;
   }
 
   function deleteDevices() {
-    const ids = (deleteRequest ?? []).filter((serial) => {
+    const items = (deleteRequest ?? []).filter(({ serial, key }) => {
       const device = merged.get(serial);
-      return device && canDelete(device);
+      return device && keyFor(serial) === key && canDelete(device);
     });
     setDeleteRequest(undefined);
-    if (ids.length !== deleteRequest?.length) {
+    if (items.length !== deleteRequest?.length) {
       setActionError("closeBeforeDelete");
       return;
     }
-    if (!ids.length) return;
+    if (!items.length) return;
+    const keys = new Set(items.map(({ key }) => key));
+    const ids = [...merged.keys()].filter((serial) => {
+      const key = keyFor(serial);
+      return key && keys.has(key);
+    });
     const deleted = new Set(ids);
-    setRemovedDevices([...new Set([...removedRef.current, ...ids])]);
-    function withoutDeleted<T>(key: string, source = loadMap<T>(key)) {
+    if (!setRemovedDevices([...new Set([...removedRef.current, ...keys])])) return;
+    function withoutDeleted<T>(key: string, source = loadMap<T>(key), includeHardware = false) {
       const next = { ...source };
       for (const id of ids) delete next[id];
-      localStorage.setItem(key, JSON.stringify(next));
+      if (includeHardware) for (const id of keys) delete next[id];
+      persistSetting(key, JSON.stringify(next));
       return next;
     }
     setKnown(withoutDeleted("known-devices", known));
     setAliases(withoutDeleted<string>("device-aliases"));
-    for (const id of ids) pendingAliasEdits.current.delete(id);
-    setMarks(withoutDeleted("device-marks-v2", marks));
-    setProfiles(withoutDeleted("device-profiles", profiles));
+    setMarks(withoutDeleted("device-marks-v2", marks, true));
+    setProfiles(withoutDeleted("device-profiles", profiles, true));
+    setDeviceBrands(withoutDeleted("device-brands", deviceBrands, true));
     for (const key of ["device-marks", "wireless-endpoints"]) withoutDeleted(key);
     setOrder((previous) => previous.filter((serial) => !deleted.has(serial)));
     setChecked((previous) => new Set([...previous].filter((serial) => !deleted.has(serial))));
@@ -223,24 +328,39 @@ export default function App() {
   }
 
   function openDeviceSettings(device: Device) {
+    const key = keyFor(device.serial);
+    if (!key) return;
     setPreview(undefined);
     setActionError(undefined);
     setProfileSerial(device.serial);
     setDeviceSettingsSection("editDevice");
     const value = deviceAlias(device.serial) ?? "";
-    setEditing({ serial: device.serial, value, originalName: value, ...(marks[device.serial] ?? defaultMark) });
+    setEditing({ serial: device.serial, key, value, originalName: value, ...(deviceValue(device.serial, marks) ?? defaultMark) });
+  }
+
+  function brandFor(serial: string) {
+    return facts[serial] ?? deviceValue(serial, deviceBrands);
+  }
+
+  function manufacturerFor(serial: string) {
+    const detected = brandFor(serial);
+    return detected?.brand === "generic" ? detected.manufacturer : detected?.brand;
   }
 
   function visibleMark(serial: string): Mark {
-    const mark = marks[serial] ?? defaultMark;
-    const manufacturer = facts[serial]?.manufacturer;
-    const siblings = manufacturer ? ordered.filter((device) => facts[device.serial]?.manufacturer === manufacturer) : [];
-    if (siblings.length < 2) return { ...mark, badge: "" };
+    const mark = deviceValue(serial, marks) ?? defaultMark;
+    const manufacturer = manufacturerFor(serial);
+    const siblings = new Map(ordered.filter((device) => manufacturer && manufacturerFor(device.serial) === manufacturer)
+      .flatMap((device) => {
+        const key = keyFor(device.serial);
+        return key ? [[key, device.serial] as const] : [];
+      }));
+    if (siblings.size < 2) return { ...mark, badge: "" };
     const assigned = new Map<string, string>();
     const used = new Set<string>();
-    const stable = siblings.map((device) => device.serial).sort();
+    const stable = [...siblings.keys()].sort();
     for (const id of stable) {
-      const badge = marks[id]?.badge;
+      const badge = deviceValue(siblings.get(id)!, marks)?.badge;
       if (badge && !used.has(badge)) { assigned.set(id, badge); used.add(badge); }
     }
     let number = 1;
@@ -249,12 +369,14 @@ export default function App() {
       while (used.has(String(number))) number++;
       assigned.set(id, String(number++));
     }
-    return { ...mark, badge: assigned.get(serial) ?? "" };
+    return { ...mark, badge: assigned.get(keyFor(serial) ?? "") ?? "" };
   }
 
   function selectDevice(serial: string) {
     setPhoneMenu(false);
     selection.current = serial;
+    selectedHardware.current = liveDevices.current.get(serial)?.hardware ?? loadMap<string>("device-identities")[serial];
+    requireSelection.current = false;
     setSelected(serial);
     setActionError(undefined);
     setCapture(undefined);
@@ -266,7 +388,7 @@ export default function App() {
     if (from < 0 || destination < 0 || destination >= ids.length || from === destination) return;
     ids.splice(from, 1);
     ids.splice(destination, 0, serial);
-    setOrder(ids);
+    setOrder([...ids, ...order.filter((serial) => !ids.includes(serial))]);
   }
 
   async function previewProfile(extraArgs: string[]) {
@@ -285,20 +407,25 @@ export default function App() {
     }
   }
 
-  function saveProfile(serial: string, profile: Profile) {
-    const next = { ...profiles, [deviceStorageKey(serial, identities)]: profile };
-    localStorage.setItem("device-profiles", JSON.stringify(next));
-    setProfiles(next);
+  function saveProfile(key: string, profile: Profile) {
+    const next = { ...loadMap<Profile>("device-profiles"), [key]: profile };
+    try {
+      saveLocalStorage("device-profiles", JSON.stringify(next));
+      setProfiles(next);
+    } catch (error) { setActionError(errorKey(error)); }
   }
 
-  function saveDeviceMark(serial: string, mark: Mark) {
-    const next = { ...marks, [serial]: mark };
-    localStorage.setItem("device-marks-v2", JSON.stringify(next));
-    setMarks(next);
+  function saveDeviceMark(key: string, mark: Mark) {
+    const next = { ...readMarks(), [key]: mark };
+    try {
+      saveLocalStorage("device-marks-v2", JSON.stringify(next));
+      setMarks(next);
+      return true;
+    } catch (error) { setActionError(errorKey(error)); return false; }
   }
 
   function saveAlias() {
-    if (!editing) return;
+    if (!editing || keyFor(editing.serial) !== editing.key) return;
     const value = editing.value.trim();
     if (Array.from(value).length > 60 || /[\u0000-\u001f\u007f-\u009f]/.test(value)) {
       setActionError("invalidName");
@@ -306,14 +433,13 @@ export default function App() {
     }
     if (value !== editing.originalName) {
       const next = loadMap<string>("device-aliases");
-      const key = deviceStorageKey(editing.serial, loadMap<string>("device-identities"));
-      if (key === editing.serial) pendingAliasEdits.current.set(editing.serial, value);
-      if (value) next[key] = value;
-      else delete next[key];
-      localStorage.setItem("device-aliases", JSON.stringify(next));
+      if (value) next[editing.key] = value;
+      else delete next[editing.key];
+      try { saveLocalStorage("device-aliases", JSON.stringify(next)); }
+      catch (error) { setActionError(errorKey(error)); return; }
       setAliases(next);
     }
-    saveDeviceMark(editing.serial, { brand: editing.brand, badge: editing.badge });
+    if (!saveDeviceMark(editing.key, { brand: editing.brand, badge: editing.badge })) return;
     setEditing({ ...editing, value, originalName: value });
     setActionError(undefined);
   }
@@ -322,26 +448,50 @@ export default function App() {
     if (!refreshing.current) {
       refreshing.current = invoke<Device[]>("list_devices")
         .then((next) => {
+          const bindings = next.filter((device) => device.hardware && liveDevices.current.get(device.serial)?.hardware !== device.hardware);
+          if (bindings.length) {
+            const updates = migrateDeviceBindings(bindings);
+            if (updates.identities) setIdentities(updates.identities);
+            if (updates.aliases) setAliases(updates.aliases);
+            if (updates.profiles) setProfiles(updates.profiles);
+            if (updates.marks) setMarks(updates.marks);
+            const serials = new Set(bindings.map(({ serial }) => serial));
+            setChecked((previous) => new Set([...previous].filter((serial) => !serials.has(serial))));
+          }
+          liveDevices.current = new Map(next.map((device) => [device.serial, device]));
           setDevices(next);
-          const online = new Set(next.filter((device) => device.status === "online").map((device) => device.serial));
-          setFacts((previous) => Object.keys(previous).every((serial) => online.has(serial))
-            ? previous : Object.fromEntries(Object.entries(previous).filter(([serial]) => online.has(serial))));
+          setFacts((previous) => {
+            const facts = Object.entries(previous);
+            const current = facts.filter(([serial, fact]) => sameConnection(fact, liveDevices.current.get(serial)));
+            return current.length === facts.length ? previous : Object.fromEntries(current);
+          });
           setListError(undefined);
           setKnown((previous) => {
             let result = previous;
-            for (const { serial, model, connection } of next) {
-              if (removedRef.current.has(serial)) continue;
+            for (const { serial, model, connection, hardware } of next) {
+              if (!hardware || removedRef.current.has(serial) || removedRef.current.has(`hardware:${hardware}`)) continue;
               if (previous[serial]?.model === model && previous[serial]?.connection === connection) continue;
               if (result === previous) result = Object.assign(Object.create(null), previous);
               result[serial] = { serial, model, connection };
             }
             return result;
           });
-          if (!selection.current) {
-            const available = next.filter((device) => !removedRef.current.has(device.serial));
-            selection.current = (available.find((device) => device.status === "online") ?? available[0])?.serial ?? "";
-            setSelected(selection.current);
-          }
+          const available = next.filter((device) => !removedRef.current.has(device.serial) &&
+            (!device.hardware || !removedRef.current.has(`hardware:${device.hardware}`)));
+          const current = available.find((device) => device.serial === selection.current);
+          const hardware = selectedHardware.current;
+          const replacement = hardware && current?.hardware && hardware !== current.hardware;
+          const alternate = hardware && (!current || current.status !== "online" || replacement)
+            ? available.find((device) => device.status === "online" && device.hardware === hardware) : undefined;
+          if (alternate) selectDevice(alternate.serial);
+          else if (replacement) {
+            selectDevice("");
+            requireSelection.current = true;
+            setActionError("deviceIdentityMismatch");
+          } else if (!selection.current && !requireSelection.current) {
+            const first = available.find((device) => device.status === "online" && device.hardware);
+            if (first) selectDevice(first.serial);
+          } else if (current?.hardware && !hardware) selectedHardware.current = current.hardware;
         })
         .catch((error: unknown) => setListError(errorKey(error)))
         .finally(() => { refreshing.current = null; setLoading(false); });
@@ -352,9 +502,11 @@ export default function App() {
   const traySettings = JSON.stringify({
     english: locale === "en-US",
     exitOnClose: closeBehavior === "exit",
-    devices: ordered.map((device) => ({
+    devices: connectionOrder.filter((device) => usable(device)).map((device) => ({
       serial: device.serial,
+      hardware: device.hardware,
       name: deviceName(device),
+      alias: deviceAlias(device.serial) ?? null,
       profile: normalProfile(device.serial),
     })),
     removed,
@@ -363,8 +515,14 @@ export default function App() {
     void invoke("tray_sync", JSON.parse(traySettings)).catch(() => {});
   }, [traySettings]);
   useEffect(() => {
-    const listener = listen<string>("open-file-tools", ({ payload }) => {
-      selectDevice(payload);
+    const listener = listen<{ serial: string; hardware: string }>("open-file-tools", ({ payload }) => {
+      const device = liveDevices.current.get(payload.serial);
+      if (!payload.hardware || device?.hardware !== payload.hardware || device.status !== "online" ||
+        removedRef.current.has(payload.serial) || removedRef.current.has(`hardware:${payload.hardware}`)) {
+        setActionError("deviceIdentityMismatch");
+        return;
+      }
+      selectDevice(payload.serial);
       setToolSection("files");
       setPage("tools");
     });
@@ -377,18 +535,27 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("display-language", locale);
+    persistSetting("display-language", locale);
     document.documentElement.lang = locale;
     document.title = messages.title;
     void getCurrentWindow().setTitle(messages.title).catch(() => {});
   }, [locale, messages.title]);
 
-  useEffect(() => localStorage.setItem("known-devices", JSON.stringify(known)), [known]);
-  useEffect(() => localStorage.setItem("device-order", JSON.stringify(order)), [order]);
-  useEffect(() => localStorage.setItem("selected-device", selected), [selected]);
-  useEffect(() => localStorage.setItem("main-close-behavior", closeBehavior), [closeBehavior]);
-  useEffect(() => localStorage.setItem("window-opacity", String(windowOpacity)), [windowOpacity]);
-  useEffect(() => localStorage.setItem("panel-opacity", String(panelOpacity)), [panelOpacity]);
+  useEffect(() => { persistSetting("known-devices", JSON.stringify(known)); }, [known]);
+  useEffect(() => { persistSetting("removed-devices", JSON.stringify(removed)); }, [removed]);
+  useEffect(() => { persistSetting("device-order", JSON.stringify(order)); }, [order]);
+  useEffect(() => { persistSetting("selected-device", selected); }, [selected]);
+  useEffect(() => { persistSetting("main-close-behavior", closeBehavior); }, [closeBehavior]);
+  useEffect(() => { persistSetting("window-opacity", String(windowOpacity)); }, [windowOpacity]);
+  useEffect(() => { persistSetting("panel-opacity", String(panelOpacity)); }, [panelOpacity]);
+
+  useEffect(() => {
+    if (target && target.serial !== selected) selectDevice(target.serial);
+  }, [target?.serial, selected]);
+
+  useEffect(() => {
+    if (profileSerial && !configured) setProfileSerial(undefined);
+  }, [profileSerial, configured]);
 
   useEffect(() => {
     void refresh();
@@ -397,49 +564,40 @@ export default function App() {
   }, [refresh]);
 
   useEffect(() => {
-    for (const { serial, status } of devices) {
-      if (status !== "online" || facts[serial] || factRequests.current.has(serial)) continue;
-      factRequests.current.add(serial);
-      void invoke<{ text: string; success: boolean }>("query_device", { serial, query: "deviceFacts" })
+    for (const device of devices) {
+      const { serial, status, hardware, transportId } = device;
+      const request = JSON.stringify([serial, transportId, hardware]);
+      if (status !== "online" || !hardware || sameConnection(device, facts[serial]) || factRequests.current.has(request)) continue;
+      factRequests.current.add(request);
+      void invoke<{ text: string; success: boolean }>("query_device", { serial, hardware, query: "deviceFacts" })
         .then(({ text, success }) => {
-          if (!success) return;
-          const hardware = text.match(/^controller-serial:([a-zA-Z0-9._-]{4,128})\s*$/m)?.[1];
-          if (hardware && !/^(unknown|0+)$/i.test(hardware) && !removedRef.current.has(serial)) {
-            const ids = loadMap<string>("device-identities");
-            bindDeviceApps(serial, hardware, ids);
-            const names = loadMap<string>("device-aliases");
-            const pendingName = pendingAliasEdits.current.get(serial);
-            const next = bindAlias(serial, hardware, ids, names, pendingName);
-            pendingAliasEdits.current.delete(serial);
-            if (ids[serial] !== hardware || next !== names) {
-              ids[serial] = hardware;
-              localStorage.setItem("device-aliases", JSON.stringify(next));
-              localStorage.setItem("device-identities", JSON.stringify(ids));
-              setAliases(next);
-              setIdentities(ids);
-              const name = next[deviceStorageKey(serial, ids)] ?? "";
-              setEditing((current) => current?.serial === serial && current.value === current.originalName
-                ? { ...current, value: name, originalName: name } : current);
-            }
-          }
+          if (!success || !sameConnection(device, liveDevices.current.get(serial))) return;
           const manufacturer = text.split(/\r?\n/)[0].toLowerCase();
           const brand = brands.find((value) => manufacturer.includes(value)) ??
             (/redmi|poco/.test(manufacturer) ? "xiaomi" : "generic");
+          setDeviceBrands((previous) => {
+            const key = `hardware:${hardware}`;
+            if (previous[key]?.brand === brand && previous[key]?.manufacturer === manufacturer) return previous;
+            const next = { ...previous, [key]: { brand, manufacturer } };
+            try { saveLocalStorage("device-brands", JSON.stringify(next)); } catch { /* 本次仍使用已识别的图标。 */ }
+            return next;
+          });
           const match = text.match(/Physical size:\s*(\d+)x(\d+)/);
           setFacts((previous) => ({ ...previous, [serial]: {
-            brand, manufacturer, sdk: Number(text.match(/^controller-sdk:(\d+)\s*$/m)?.[1]) || undefined, size: match ? [Number(match[1]), Number(match[2])] : undefined,
+            hardware, transportId, brand, manufacturer, sdk: Number(text.match(/^controller-sdk:(\d+)\s*$/m)?.[1]) || undefined,
+            size: match ? [Number(match[1]), Number(match[2])] : undefined,
           } }));
-        }).catch(() => {}).finally(() => { factRequests.current.delete(serial); });
+        }).catch(() => {}).finally(() => { factRequests.current.delete(request); });
     }
   }, [devices, facts]);
 
   async function lockDevice(device: Device) {
     const serial = device.serial;
-    if (pending.has(serial)) return;
+    if (pending.has(serial) || !usable(device)) return;
     setActionError(undefined);
     setPending((previous) => new Set(previous).add(serial));
     try {
-      await invoke("lock_device", { serial });
+      await invoke("lock_device", { serial, hardware: device.hardware });
     } catch (error) {
       setActionError(errorKey(error));
     } finally {
@@ -452,16 +610,13 @@ export default function App() {
   }
 
   async function operate(device: Device, operation: "open_device" | "stop_device") {
-    if (pending.has(device.serial)) return;
+    if (pending.has(device.serial) || (operation === "open_device" && !usable(device))) return;
     setPending((previous) => new Set(previous).add(device.serial));
     setActionError(undefined);
     try {
       if (operation === "open_device") {
-        const path = await invoke<string | null>(operation, {
-          serial: device.serial,
-          alias: deviceAlias(device.serial) ?? null,
-          profile: normalProfile(device.serial),
-        });
+        await invoke("tray_sync", JSON.parse(traySettings));
+        const path = await invoke<string | null>("launch_device", { serial: device.serial, hardware: device.hardware });
         if (path && (page === "devices" || selection.current === device.serial)) {
           setCapture({ name: deviceName(device), path, serial: device.serial });
         }
@@ -484,22 +639,22 @@ export default function App() {
   async function changeConnection(device: Device) {
     if (pending.has(device.serial)) return;
     const serial = device.serial;
-    const disconnecting = devices.some((entry) => entry.serial === serial);
+    const disconnecting = live.get(serial)?.status === "online";
+    if ((device.connection === "wired" || disconnecting) && !usable(device)) return;
     setPending((previous) => new Set(previous).add(serial));
     setActionError(undefined);
     try {
       if (device.connection === "wired") {
-        const wireless = await invoke<string>("switch_to_wireless", { serial });
-        restoreDevice(wireless);
-        selectDevice(wireless);
+        const wireless = await invoke<string>("switch_to_wireless", { serial, hardware: device.hardware });
+        if (await restoreDevice(wireless, device.hardware ?? undefined)) selectDevice(wireless);
         return;
       }
       const addresses = loadMap<string>("wireless-endpoints");
       const address = disconnecting
-        ? await invoke<string>("disconnect_wireless", { serial })
+        ? await invoke<string>("disconnect_wireless", { serial, hardware: device.hardware })
         : await invoke<string>("connect_wireless", { target: serial, savedAddress: addresses[serial] ?? null });
       addresses[serial] = address;
-      localStorage.setItem("wireless-endpoints", JSON.stringify(addresses));
+      saveLocalStorage("wireless-endpoints", JSON.stringify(addresses));
     } catch (error) {
       setActionError(errorKey(error));
     } finally {
@@ -516,6 +671,13 @@ export default function App() {
   const deletable = ordered.filter(canDelete).map((device) => device.serial);
   const selectedForDeletion = deletable.filter((serial) => checked.has(serial));
   const allChecked = deletable.length > 0 && selectedForDeletion.length === deletable.length;
+
+  function requestDelete(serials: string[]) {
+    setDeleteRequest(serials.flatMap((serial) => {
+      const key = keyFor(serial);
+      return key ? [{ serial, key }] : [];
+    }));
+  }
 
   return (
     <div className="window-shell" style={windowStyle} onKeyDown={(event) => {
@@ -559,24 +721,25 @@ export default function App() {
             aria-expanded={phoneMenu} data-tip={target ? `${t("currentPhone")} · ${currentTitle}` : t("chooseActivePhone")}
             onClick={() => setPhoneMenu(!phoneMenu)}>
             <DeviceMark mark={target ? visibleMark(target.serial) : defaultMark}
-              detected={target ? facts[target.serial]?.brand : undefined} />
+              detected={target ? brandFor(target.serial)?.brand : undefined} />
           </button>
           {phoneMenu && <div className="phone-popover panel" role="group" aria-label={t("chooseActivePhone")}>
           {!ordered.length && <p>{t("noTarget")}</p>}
           {ordered.map((device) => {
             const name = deviceName(device);
-            const label = `${name} · ${t(device.connection)} · ${t(device.status)}`;
+            const label = `${name} · ${t(device.connection)} · ${statusLabel(device)}`;
             return <button type="button" key={device.serial} data-phone={device.serial} data-tip={label}
-              className={`icon-button phone-choice ${device.status === "online" ? "" : "phone-offline"}`}
-              aria-label={label} aria-pressed={selected === device.serial} onClick={() => selectDevice(device.serial)}>
-              <DeviceMark mark={visibleMark(device.serial)} detected={facts[device.serial]?.brand} />
-              <span className="phone-name">{name}<small>{t(device.connection)} · {t(device.status)}</small></span>
+              className={`icon-button phone-choice ${usable(device) ? "" : "phone-offline"}`}
+              aria-label={label} aria-pressed={target?.serial === device.serial} disabled={device.status === "online" && !device.hardware}
+              onClick={() => selectDevice(device.serial)}>
+              <DeviceMark mark={visibleMark(device.serial)} detected={brandFor(device.serial)?.brand} />
+              <span className="phone-name">{name}<small>{t(device.connection)} · {statusLabel(device)}</small></span>
             </button>;
           })}
           </div>}
         </div>
         <IconButton icon="settings" label={messages.settings}
-          active={page === "settings"} onClick={() => setPage("settings")} />
+          active={page === "settings"} onClick={() => { setPhoneMenu(false); setPage("settings"); }} />
       </nav>
       <main className={page === "devices" ? "device-page" : undefined} onPointerDown={() => setPhoneMenu(false)}>
         <div className="page-content">
@@ -584,8 +747,8 @@ export default function App() {
           <span role="status">{t("hiddenDevicesDetected")} · {hiddenDevices.length}</span>
           <button type="button" onClick={() => setConnectionOpen(true)}>{t("viewHiddenDevices")}</button>
         </div>}
-        {!connectionOpen && page !== "settings" && page !== "appWindows" &&
-          <ErrorToast message={actionError ? t(actionError) : listError ? t(listError) : undefined} dismiss={t("dismissNotice")} />}
+        {!connectionOpen && <ErrorToast message={actionError ? t(actionError)
+          : page !== "settings" && page !== "appWindows" && listError ? t(listError) : undefined} dismiss={t("dismissNotice")} />}
         {page === "devices" && capture && <div className="panel hidden-device-notice">
           <span className="capture" role="status">{t("capturePath")} · {capture.name} · {capture.path}</span>
           <button type="button" disabled={["starting", "running", "stopping"].includes(merged.get(capture.serial)?.session ?? "")}
@@ -644,11 +807,12 @@ export default function App() {
             </div>
           </div>
         ) : page === "appWindows" ? (
-          <AppWindowPanel key={`${selected}:${appDeviceKey}:${!listError && target?.status === "online"}`} deviceKey={appDeviceKey} serial={!listError && target?.status === "online" ? target.serial : undefined}
+          <AppWindowPanel key={`${selected}:${appDeviceKey}:${usable(target)}`} deviceKey={appDeviceKey}
+            serial={usable(target) ? target?.serial : undefined} hardware={usable(target) ? target?.hardware ?? undefined : undefined}
             title={currentTitle} screen={target ? facts[target.serial]?.size : undefined} t={t} />
         ) : page === "tools" ? (
-          <ToolPanel key={selected} section={toolSection}
-            device={listError ? undefined : target} profile={target ? profileFor(target.serial) : defaultProfile} t={t} refresh={refresh} />
+          <ToolPanel key={`${selected}:${appDeviceKey}:${usable(target)}`} section={toolSection}
+            device={usable(target) ? target : undefined} profile={target ? profileFor(target.serial) : defaultProfile} t={t} refresh={refresh} />
         ) : (
           <>
             {ordered.length ? (
@@ -656,8 +820,7 @@ export default function App() {
                 {ordered.map((device) => {
                   const running = device.session === "running";
                   const busy = pending.has(device.serial) || device.session === "starting" || device.session === "stopping";
-                  const canOpen = !busy && !(device.task && running) &&
-                    (running || (device.status === "online" && !listError));
+                  const canOpen = !busy && !(device.task && running) && usable(device);
                   return (
                     <li className={`device ${dragging === device.serial ? "dragging" : ""} ${dropTarget === device.serial && dragging !== device.serial
                       ? ordered.findIndex((entry) => entry.serial === dragging) < ordered.indexOf(device) ? "drop-after" : "drop-before" : ""}`}
@@ -690,31 +853,33 @@ export default function App() {
                           setDragging(undefined);
                           setDropTarget(undefined);
                         }} onLostPointerCapture={() => { setDragging(undefined); setDropTarget(undefined); }}><GripVertical aria-hidden="true" size={16} /></span>}
-                      <DeviceMark mark={visibleMark(device.serial)} detected={facts[device.serial]?.brand} />
+                      <DeviceMark mark={visibleMark(device.serial)} detected={brandFor(device.serial)?.brand} />
                       <div className="device-details">
                         <strong>{deviceName(device)}</strong>
                         <small>{messages[device.connection]}</small>
                       </div>
-                      <span className={device.session === "failed" ? "status failure" : running || device.status === "online" ? "status online" : "status"}>
-                        {running && device.task ? t(device.task) : device.session !== "idle" ? t(device.session) : t(device.status)}
+                      <span className={device.session === "failed" ? "status failure" : usable(device) ? "status online" : "status"}>
+                        {device.status === "online" && !device.hardware ? statusLabel(device) :
+                          running && device.task ? t(device.task) : device.session !== "idle" ? t(device.session) : statusLabel(device)}
                       </span>
                       {!bulk && <div className="actions">
                         {device.connection === "wired" && device.status === "online" && <IconButton
-                          icon="wireless" label={t("connectViaWireless")} disabled={pending.has(device.serial) || !!listError}
+                          icon="wireless" label={t("connectViaWireless")} disabled={pending.has(device.serial) || !usable(device)}
                           onClick={() => void changeConnection(device)} />}
                         {device.connection === "wireless" && <IconButton
-                          icon={devices.some((entry) => entry.serial === device.serial) ? "disconnect" : "refresh"}
-                          label={t(devices.some((entry) => entry.serial === device.serial) ? "disconnectAction" : "reconnectAction")}
-                          disabled={pending.has(device.serial) || !!listError} onClick={() => void changeConnection(device)} />}
-                        <IconButton icon="lock" label={t("lockDevice")} disabled={busy || device.status !== "online" || !!listError}
+                          icon={device.status === "online" ? "disconnect" : "refresh"}
+                          label={t(device.status === "online" ? "disconnectAction" : "reconnectAction")}
+                          disabled={pending.has(device.serial) || !!listError || (device.status === "online" && !usable(device))}
+                          onClick={() => void changeConnection(device)} />}
+                        <IconButton icon="lock" label={t("lockDevice")} disabled={busy || !usable(device)}
                           onClick={() => void lockDevice(device)} />
-                        <IconButton icon="profiles" label={t("deviceSettings")} onClick={() => openDeviceSettings(device)} />
+                        <IconButton icon="profiles" label={t("deviceSettings")} disabled={!keyFor(device.serial)} onClick={() => openDeviceSettings(device)} />
                         {(!device.task || !running) && <IconButton icon={running ? "focus" : "open"} label={messages[running ? "focus" : "open"]}
                           disabled={!canOpen} onClick={() => void operate(device, "open_device")} />}
                         {(running || device.session === "stopping") && !["backgroundRecord", "audioRecord"].includes(device.task ?? "") && <IconButton icon="stop" label={messages.stop}
                           disabled={!running || busy} onClick={() => void operate(device, "stop_device")} />}
                         <IconButton icon="trash" label={t(canDelete(device) ? "deleteDevice" : "closeBeforeDelete")}
-                          disabled={!canDelete(device)} onClick={() => setDeleteRequest([device.serial])} />
+                          disabled={!canDelete(device)} onClick={() => requestDelete([device.serial])} />
                       </div>}
                     </li>
                   );
@@ -728,7 +893,7 @@ export default function App() {
           <header className="device-settings-header"><h2>{t("deviceSettings")} · {deviceName(configured)}</h2>
             <div className="actions">
               <IconButton icon="refresh" label={t("refresh")} onClick={() => void refresh()} />
-              <IconButton icon="reset" label={t("resetProfile")} onClick={() => saveProfile(configured.serial, defaultProfile)} />
+              <IconButton icon="reset" label={t("resetProfile")} onClick={() => saveProfile(editing.key, defaultProfile)} />
               <IconButton icon="close" label={t("cancel")} onClick={() => setProfileSerial(undefined)} />
             </div>
           </header>
@@ -762,7 +927,7 @@ export default function App() {
                       <select value={editing.brand} onChange={(event) => {
                         const brand = event.target.value as Mark["brand"];
                         setEditing({ ...editing, brand });
-                        saveDeviceMark(editing.serial, { ...(marks[editing.serial] ?? defaultMark), brand });
+                        saveDeviceMark(editing.key, { ...(deviceValue(editing.serial, marks) ?? defaultMark), brand });
                       }}>
                         <option value="auto">{t("automaticBrand")}</option>
                         {brands.map((brand) => <option value={brand} key={brand}>{t(brand)}</option>)}
@@ -774,15 +939,16 @@ export default function App() {
                 </form>
               </section> : deviceSettingsSection === "launchPreview" ? <LaunchArgumentsEditor
                 key={configured.serial} args={currentProfile.extraArgs} t={t}
-                update={(extraArgs) => saveProfile(configured.serial, { ...currentProfile, extraArgs })}
+                update={(extraArgs) => saveProfile(editing.key, { ...currentProfile, extraArgs })}
                 inspect={(args) => void previewProfile(args)}
                 preview={preview?.serial === configured.serial && preview.title === deviceName(configured)
                   && JSON.stringify(preview.profile) === JSON.stringify(currentProfile)
                   ? preview.args : undefined} />
                 : <ProfileEditor section={deviceSettingsSection} placementSerial={configured.serial}
-                  serial={configured.status === "online" ? configured.serial : undefined}
+                  serial={usable(configured) ? configured.serial : undefined}
+                  hardware={usable(configured) ? configured.hardware ?? undefined : undefined}
                   sdk={facts[configured.serial]?.sdk} screen={facts[configured.serial]?.size} profile={currentProfile}
-                  update={(profile) => saveProfile(configured.serial, profile)} t={t} />}
+                  update={(profile) => saveProfile(editing.key, profile)} t={t} />}
             </div>
           </div>
         </section>}
@@ -803,7 +969,7 @@ export default function App() {
           {bulk && <button type="button" disabled={!deletable.length}
             onClick={() => setChecked(new Set(allChecked ? [] : deletable))}>{t(allChecked ? "clearDeviceSelection" : "selectAllDevices")}</button>}
           {bulk && <IconButton icon="trash" label={t("deleteSelectedDevices")} disabled={!selectedForDeletion.length}
-            onClick={() => setDeleteRequest(selectedForDeletion)} />}
+            onClick={() => requestDelete(selectedForDeletion)} />}
           <IconButton icon="selectDevices" label={t(bulk ? "cancelDeviceSelection" : "selectDevices")}
             active={bulk} disabled={!ordered.some(canDelete) && !bulk}
             onClick={() => { setBulk(!bulk); setChecked(new Set()); }} />

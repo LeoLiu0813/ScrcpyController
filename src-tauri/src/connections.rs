@@ -1,4 +1,4 @@
-use crate::devices::{QueryOutput, adb_path, capture_command, engine, read_devices};
+use crate::devices::{QueryOutput, adb_path, capture_command, engine, read_devices, verify_device};
 use std::{
     net::SocketAddr,
     os::windows::process::CommandExt,
@@ -184,15 +184,15 @@ pub async fn connect_wireless(
 }
 
 #[tauri::command]
-pub async fn switch_to_wireless(app: AppHandle, serial: String) -> Result<String> {
+pub async fn switch_to_wireless(app: AppHandle, serial: String, hardware: Option<String>) -> Result<String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = engine(&app)?;
-        if !read_devices(&path)?.iter().any(|device| {
-            device.serial == serial && device.connection == "wired" && device.status == "online"
-        }) {
+        let wired = verify_device(&app, &serial, hardware.as_deref())?;
+        if wired.connection != "wired" {
             return Err("deviceUnavailable");
         }
-        let prefix = format!("adb-{serial}-");
+        let verified = wired.hardware.as_deref().ok_or("deviceVerifying")?;
+        let prefix = format!("adb-{verified}-");
         let mut names: Vec<_> = discovered(&path)
             .into_iter()
             .map(|(name, _)| name)
@@ -207,12 +207,15 @@ pub async fn switch_to_wireless(app: AppHandle, serial: String) -> Result<String
         if !output.success {
             return Err("connectFailed");
         }
-        let identity = adb(&path, &["-s", name, "shell", "getprop", "ro.serialno"], None)
-            .map_err(|_| "wiredWirelessUnavailable")?;
-        if identity.success && identity.text == serial {
-            Ok(name.clone())
-        } else {
-            Err("wiredWirelessUnavailable")
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match verify_device(&app, name, Some(verified)) {
+                Ok(_) => return Ok(name.clone()),
+                Err("deviceUnavailable" | "deviceVerifying") if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(200));
+                }
+                Err(error) => return Err(error),
+            }
         }
     })
     .await
@@ -220,14 +223,14 @@ pub async fn switch_to_wireless(app: AppHandle, serial: String) -> Result<String
 }
 
 #[tauri::command]
-pub async fn disconnect_wireless(app: AppHandle, serial: String) -> Result<String> {
+pub async fn disconnect_wireless(app: AppHandle, serial: String, hardware: Option<String>) -> Result<String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = engine(&app)?;
-        if !read_devices(&path)?
-            .iter()
-            .any(|device| device.serial == serial && device.connection == "wireless")
-        {
-            return Err("deviceUnavailable");
+        let device = read_devices(&path)?.into_iter()
+            .find(|device| device.serial == serial && device.connection == "wireless")
+            .ok_or("deviceUnavailable")?;
+        if device.status == "online" {
+            verify_device(&app, &serial, hardware.as_deref())?;
         }
         let address = resolve(&path, &serial)?;
         let output = adb(&path, &["disconnect", &serial], None).map_err(|_| "disconnectFailed")?;

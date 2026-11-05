@@ -33,7 +33,7 @@ pub fn run() {
             connections::connect_wireless,
             connections::switch_to_wireless,
             connections::disconnect_wireless,
-            devices::open_device,
+            tray::launch_device,
             devices::mirror_info,
             devices::lock_device,
             devices::mirror_stats,

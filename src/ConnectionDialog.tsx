@@ -11,7 +11,7 @@ export default function ConnectionDialog({ t, onClose, refresh, restoreEntries, 
   onClose: () => void;
   refresh: () => Promise<void> | null;
   restoreEntries: { serial: string; model: string }[];
-  onRestore: (serial: string) => void;
+  onRestore: (serial: string) => Promise<boolean>;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [mode, setMode] = useState<Mode>("wired");
@@ -41,8 +41,7 @@ export default function ConnectionDialog({ t, onClose, refresh, restoreEntries, 
         await refresh();
       } else {
         const connected = await invoke<string>("connect_wireless", { target: address, savedAddress: null });
-        onRestore(connected);
-        await refresh();
+        await onRestore(connected);
         onClose();
       }
     } catch (error) {
@@ -57,7 +56,7 @@ export default function ConnectionDialog({ t, onClose, refresh, restoreEntries, 
     <h2>{t("addDevice")}</h2>
     <nav className="connection-modes" aria-label={t("connectionMethods")}>
       {modes.map((entry) => <button key={entry} type="button" aria-pressed={entry === mode} disabled={busy}
-        onClick={() => { setMode(entry); setFailure(undefined); setCode(""); }}>{t(entry === "wired" ? "wiredMode" : entry)}</button>)}
+        onClick={() => { setMode(entry); setFailure(undefined); setCode(""); setPaired(false); }}>{t(entry === "wired" ? "wiredMode" : entry)}</button>)}
     </nav>
     <form onSubmit={(event) => void submit(event)}>
       {mode === "wired" && <p>{t("wiredInstructions")}</p>}
@@ -65,12 +64,12 @@ export default function ConnectionDialog({ t, onClose, refresh, restoreEntries, 
         <h2>{t("restoreDetectedDevices")}</h2>
         {restoreEntries.map((entry) => <div key={entry.serial}>
           <span>{entry.model} · {entry.serial}</span>
-          <button type="button" onClick={() => onRestore(entry.serial)}>{t("restoreDevice")}</button>
+          <button type="button" onClick={() => void onRestore(entry.serial)}>{t("restoreDevice")}</button>
         </div>)}
       </section>}
       {mode === "pairMode" && <>
         <label className="field" data-tip={t("pairAddressHint")}><span>{t("pairAddress")}</span>
-          <input value={pairAddress} onChange={(event) => setPairAddress(event.target.value)}
+          <input value={pairAddress} onChange={(event) => { setPairAddress(event.target.value); setPaired(false); }}
             placeholder="192.168.1.20:37001" required disabled={busy} spellCheck={false} /></label>
         <label className="field"><span>{t("pairCode")}</span>
           <input type="password" inputMode="numeric" autoComplete="off" maxLength={6} pattern="[0-9]{6}"

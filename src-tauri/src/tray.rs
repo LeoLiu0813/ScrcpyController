@@ -1,8 +1,9 @@
 use crate::{devices, profile::Profile};
 use serde::{Deserialize, Serialize};
 use std::{
+    path::PathBuf,
     sync::{
-        Mutex,
+        Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -12,13 +13,7 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
 };
-
-use windows_sys::Win32::{
-    Foundation::HWND,
-    UI::WindowsAndMessaging::{
-        GetForegroundWindow, IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow,
-    },
-};
+use windows_sys::Win32::{System::Threading::GetCurrentProcessId, UI::WindowsAndMessaging::AllowSetForegroundWindow};
 
 const ID: &str = "controller-tray";
 
@@ -26,6 +21,7 @@ const ID: &str = "controller-tray";
 pub struct TrayState {
     quitting: AtomicBool,
     settings: Mutex<Settings>,
+    settings_changed: Condvar,
     rows: Mutex<Vec<Row>>,
 }
 
@@ -40,13 +36,17 @@ struct Settings {
 #[derive(Clone, Deserialize)]
 pub struct TrayDevice {
     serial: String,
-    name: String,
-    profile: Option<Profile>,
+    pub(crate) hardware: String,
+    pub(crate) name: String,
+    alias: Option<String>,
+    profile: Profile,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize)]
 struct Row {
     serial: String,
+    #[serde(skip_serializing)]
+    hardware: String,
     name: String,
     running: bool,
 }
@@ -65,15 +65,16 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             }
             "tray-quit" => quit(app),
             id => {
-                if let Some(serial) = id.strip_prefix("tray-device:") {
-                    // Apply the activation while handling the user's native menu selection.
-                    if !quitting(app) && focus_existing(app, serial) {
-                        return;
-                    }
+                if let Some((hardware, serial)) = id.strip_prefix("tray-device:")
+                    .and_then(|target| target.split_once(':'))
+                {
+                    // Preserve foreground permission from the menu click while the target is verified.
+                    unsafe { AllowSetForegroundWindow(GetCurrentProcessId()); }
                     let app = app.clone();
                     let serial = serial.to_owned();
+                    let hardware = hardware.to_owned();
                     tauri::async_runtime::spawn(async move {
-                        if let Err(code) = open_device(&app, serial).await {
+                        if let Err(code) = open_device(&app, serial, Some(hardware)).await {
                             let _ = show(&app);
                             let _ = app.emit_to("main", "tray-device-error", code);
                         }
@@ -124,26 +125,17 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 .unwrap_or_default();
             let mut rows = Vec::new();
             if let Ok(devices) = devices::tray_devices(&handle) {
-                for device in devices.into_iter().filter(|device| {
-                    device.status == "online" && !settings.removed.contains(&device.serial)
-                }) {
-                    let configured = settings
-                        .devices
-                        .iter()
-                        .find(|entry| entry.serial == device.serial);
+                for device in devices.into_iter().filter(|device| device.status == "online") {
+                    let Some(hardware) = device.hardware else { continue; };
+                    let Some(configured) = settings.device(&device.serial, Some(&hardware)) else { continue; };
                     rows.push(Row {
-                        name: configured.map_or(device.model, |entry| entry.name.clone()),
+                        name: configured.name.clone(),
                         serial: device.serial,
+                        hardware,
                         running: device.session == "running",
                     });
                 }
-                rows.sort_by_key(|row| {
-                    settings
-                        .devices
-                        .iter()
-                        .position(|device| device.serial == row.serial)
-                        .unwrap_or(usize::MAX)
-                });
+                rows = settings.device_rows(rows);
             }
             if previous.as_ref() != Some(&(settings.english, rows.clone()))
                 && let Some(tray) = handle.tray_by_id(ID)
@@ -204,7 +196,7 @@ fn build_menu(app: &AppHandle, english: bool, rows: &[Row]) -> tauri::Result<Men
         let name = row.name.replace('&', "&&");
         let item = MenuItem::with_id(
             app,
-            format!("tray-device:{}", row.serial),
+            format!("tray-device:{}:{}", row.hardware, row.serial),
             format!("{name} · {status}"),
             true,
             None::<&str>,
@@ -233,54 +225,82 @@ pub fn show(app: &AppHandle) -> Result<(), &'static str> {
     main.set_focus().map_err(|_| "focusDenied")
 }
 
-fn focus_existing(app: &AppHandle, serial: &str) -> bool {
-    let Ok(window) = devices::cli_mirror_window(app, serial) else {
-        return false;
-    };
-    let Ok(window) = window.hwnd() else {
-        return false;
-    };
-    let window = window.0 as HWND;
-    unsafe {
-        if IsIconic(window) != 0 {
-            ShowWindow(window, SW_RESTORE);
+impl Settings {
+    fn device_rows(&self, mut rows: Vec<Row>) -> Vec<Row> {
+        rows.sort_by_key(|row| self.devices.iter()
+            .position(|device| device.serial == row.serial).unwrap_or(usize::MAX));
+        let mut devices: Vec<Row> = Vec::new();
+        for row in rows {
+            if let Some(existing) = devices.iter_mut().find(|device| device.hardware == row.hardware) {
+                // Keep one phone entry and target the transport with its active window.
+                if row.running && !existing.running { *existing = row; }
+            } else {
+                devices.push(row);
+            }
         }
-        GetForegroundWindow() == window || SetForegroundWindow(window) != 0
+        devices
+    }
+
+    fn is_removed(&self, serial: &str, hardware: &str) -> bool {
+        self.removed.iter().any(|key| key == serial || key.strip_prefix("hardware:") == Some(hardware))
+    }
+
+    fn device(&self, serial: &str, hardware: Option<&str>) -> Option<&TrayDevice> {
+        self.devices.iter().find(|entry| {
+            entry.serial == serial && hardware.is_none_or(|expected| entry.hardware == expected)
+                && !self.is_removed(serial, &entry.hardware)
+        })
     }
 }
 
-pub(crate) fn configured_name(app: &AppHandle, serial: &str) -> Option<String> {
-    let state = app.state::<TrayState>();
-    let settings = state.settings.lock().ok()?;
-    settings.devices.iter().find(|entry| entry.serial == serial).map(|entry| entry.name.clone())
+fn configured_device(app: &AppHandle, serial: &str, hardware: Option<&str>) -> Option<TrayDevice> {
+    app.state::<TrayState>().settings.lock().ok()?.device(serial, hardware).cloned()
 }
 
-pub async fn open_device(app: &AppHandle, serial: String) -> Result<(), &'static str> {
-    if quitting(app) {
-        return Err("sessionError");
+pub(crate) fn is_removed(app: &AppHandle, serial: &str, hardware: &str) -> bool {
+    app.state::<TrayState>().settings.lock().map_or(true, |settings| settings.is_removed(serial, hardware))
+}
+
+pub(crate) fn expected_hardware(app: &AppHandle, serial: &str) -> Option<String> {
+    configured_device(app, serial, None).map(|entry| entry.hardware)
+}
+
+pub(crate) fn input_hardware(app: &AppHandle, serial: &str) -> Option<String> {
+    configured_device(app, serial, None).filter(|entry| !entry.profile.read_only).map(|entry| entry.hardware)
+}
+
+pub(crate) fn configured_name(app: &AppHandle, serial: &str, hardware: Option<&str>) -> Option<String> {
+    configured_device(app, serial, hardware).and_then(|entry| entry.alias)
+}
+
+pub(crate) async fn wait_for_device(app: &AppHandle, serial: &str, hardware: Option<String>) -> Result<TrayDevice, &'static str> {
+    if quitting(app) { return Err("sessionError"); }
+    if let Some(hardware) = hardware {
+        let entry = configured_device(app, serial, None).ok_or("deviceUnavailable")?;
+        return (entry.hardware == hardware).then_some(entry).ok_or("deviceIdentityMismatch");
     }
-    let settings = app.state::<TrayState>();
-    let entry = {
-        let settings = settings.settings.lock().map_err(|_| "sessionError")?;
-        if settings.removed.contains(&serial) {
-            return Err("deviceUnavailable");
-        }
-        settings
-            .devices
-            .iter()
-            .find(|entry| entry.serial == serial)
-            .cloned()
-    };
-    if focus_existing(app, &serial) {
-        return Ok(());
-    }
-    let running = devices::cli_mirror_window(app, &serial).is_ok();
-    let (alias, profile) = entry.map_or((None, None), |entry| (Some(entry.name), entry.profile));
-    devices::open_device(app.clone(), serial.clone(), alias, profile).await?;
-    if running && !focus_existing(app, &serial) {
-        return Err("focusDenied");
-    }
-    Ok(())
+    let app = app.clone();
+    let serial = serial.to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<TrayState>();
+        let settings = state.settings.lock().map_err(|_| "sessionError")?;
+        // A cold command-line launch must wait for the main window to publish its saved settings.
+        let (settings, _) = state.settings_changed.wait_timeout_while(settings, Duration::from_secs(6), |current| {
+            !quitting(&app) && !current.removed.contains(&serial) && current.device(&serial, None).is_none()
+        }).map_err(|_| "sessionError")?;
+        settings.device(&serial, None).cloned().ok_or("deviceUnavailable")
+    }).await.map_err(|_| "sessionError")?
+}
+
+pub async fn open_device(app: &AppHandle, serial: String, hardware: Option<String>) -> Result<Option<PathBuf>, &'static str> {
+    let entry = wait_for_device(app, &serial, hardware).await?;
+    devices::open_device(app.clone(), serial, entry.alias, Some(entry.profile), Some(entry.hardware)).await
+}
+
+#[tauri::command]
+pub async fn launch_device(window: WebviewWindow, serial: String, hardware: String) -> Result<Option<PathBuf>, &'static str> {
+    if window.label() != "main" { return Err("invalidArguments"); }
+    open_device(window.app_handle(), serial, Some(hardware)).await
 }
 
 pub fn quit(app: &AppHandle) {
@@ -292,6 +312,7 @@ pub fn quit(app: &AppHandle) {
         return;
     }
     let app = app.clone();
+    app.state::<TrayState>().settings_changed.notify_all();
     tauri::async_runtime::spawn_blocking(move || {
         devices::shutdown_windows(&app);
         app.exit(0);
@@ -332,9 +353,53 @@ pub fn tray_sync(
         devices,
         removed,
     };
+    state.settings_changed.notify_all();
     Ok(())
 }
 
 pub fn hide(app: &AppHandle) -> Result<(), &'static str> {
     main_window(app)?.hide().map_err(|_| "windowPending")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stale_menu_entry_cannot_select_reassigned_hardware() {
+        let serial = "192.168.0.10:5555";
+        let settings = Settings {
+            devices: vec![TrayDevice {
+                serial: serial.into(), hardware: "new-device".into(), name: "新手机".into(),
+                alias: None, profile: Profile::default(),
+            }],
+            removed: vec!["hardware:old-device".into()],
+            ..Settings::default()
+        };
+        assert!(settings.device(serial, Some("old-device")).is_none());
+        assert!(settings.device(serial, Some("new-device")).is_some());
+        assert!(settings.is_removed("another-connection", "old-device"));
+    }
+
+    #[test]
+    fn duplicate_connections_keep_the_running_window_and_phone_order() {
+        let entry = |serial: &str, hardware: &str| TrayDevice {
+            serial: serial.into(), hardware: hardware.into(), name: hardware.into(),
+            alias: None, profile: Profile::default(),
+        };
+        let settings = Settings {
+            devices: vec![entry("wireless-a", "phone-a"), entry("wired-b", "phone-b"), entry("mdns-a", "phone-a")],
+            ..Settings::default()
+        };
+        let rows = settings.devices.iter().rev().map(|device| Row {
+            serial: device.serial.clone(), hardware: device.hardware.clone(), name: device.name.clone(),
+            running: device.serial == "mdns-a",
+        }).collect();
+        let rows = settings.device_rows(rows);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].hardware, "phone-a");
+        assert_eq!(rows[0].serial, "mdns-a");
+        assert!(rows[0].running);
+        assert_eq!(rows[1].hardware, "phone-b");
+    }
 }

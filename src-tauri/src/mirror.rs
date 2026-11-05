@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex, atomic::{AtomicU32, AtomicU64, Ordering}},
 };
 use crate::profile::StartupPlacement;
-use tauri::{Emitter, AppHandle, Manager, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{Emitter, AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use windows_sys::Win32::{
     Foundation::{GetLastError, HWND, POINT, RECT, SetLastError},
     Graphics::Gdi::{ClientToScreen, CreateRectRgn, CreateRoundRectRgn, DeleteObject, EqualRgn, GetWindowRgn, ScreenToClient, SetWindowRgn},
@@ -15,10 +15,14 @@ use windows_sys::Win32::{
     UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
     UI::WindowsAndMessaging::{
         ChildWindowFromPointEx, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, GWL_STYLE, GetAncestor, GA_ROOT, GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO, GetParent, GetWindowRect, SetCursorPos, WindowFromPoint, IsWindowVisible, IsIconic, GetWindowLongPtrW, HWND_TOP, IsWindow, PostMessageW,
-        SW_HIDE, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetParent, SetWindowLongPtrW,
-        SetWindowPos, ShowWindowAsync, WM_APP, WM_CLOSE, WM_EXITSIZEMOVE, WM_MOUSEMOVE, WM_MOVE, WM_NCDESTROY, WM_SIZE, WM_KEYDOWN, WM_KEYUP, WS_CHILD, WS_POPUP,
+        SW_HIDE, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetParent, SetWindowLongPtrW,
+        SetWindowPos, ShowWindowAsync, WM_APP, WM_CLOSE, WM_DPICHANGED, WM_EXITSIZEMOVE, WM_MOUSEMOVE, WM_MOVE, WM_NCDESTROY, WM_SIZE, WM_KEYDOWN, WM_KEYUP, WS_CHILD, WS_POPUP,
     },
 };
+
+// Match the compact title bar in MirrorWindow.css and mirrorSizing.ts.
+const MINIMUM_WIDTH: u32 = 288;
+const MINIMUM_HEIGHT: u32 = 310;
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Placement {
@@ -26,6 +30,36 @@ pub(crate) struct Placement {
     y: i32,
     width: u32,
     height: u32,
+}
+
+impl Placement {
+    fn at_least_minimum(self, scale: f64) -> Self {
+        Self {
+            width: self.width.max((f64::from(MINIMUM_WIDTH) * scale).ceil() as u32),
+            height: self.height.max((f64::from(MINIMUM_HEIGHT) * scale).ceil() as u32),
+            ..self
+        }
+    }
+
+    fn overlap(self, area: Self) -> u64 {
+        let width = (i64::from(self.x) + i64::from(self.width))
+            .min(i64::from(area.x) + i64::from(area.width)) - i64::from(self.x.max(area.x));
+        let height = (i64::from(self.y) + i64::from(self.height))
+            .min(i64::from(area.y) + i64::from(area.height)) - i64::from(self.y.max(area.y));
+        width.max(0) as u64 * height.max(0) as u64
+    }
+
+    fn fit_within(self, area: Self, scale: f64) -> Self {
+        let size = self.at_least_minimum(scale);
+        let width = size.width.min(area.width);
+        let height = size.height.min(area.height);
+        Self {
+            x: self.x.clamp(area.x, area.x + (area.width - width) as i32),
+            y: self.y.clamp(area.y, area.y + (area.height - height) as i32),
+            width,
+            height,
+        }
+    }
 }
 
 static PLACEMENTS: Mutex<()> = Mutex::new(());
@@ -38,63 +72,81 @@ fn read_placements(path: &std::path::Path) -> BTreeMap<String, Placement> {
     fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
 }
 
-#[tauri::command]
-pub(crate) fn last_mirror_placement(app: AppHandle, serial: String) -> Result<Option<Placement>, &'static str> {
-    let key = serde_json::to_string(&(serial, Option::<String>::None)).map_err(|_| "sessionError")?;
-    let _lock = PLACEMENTS.lock().map_err(|_| "sessionError")?;
-    Ok(read_placements(&placement_path(&app)?).get(&key).copied())
+fn write_placements(path: &std::path::Path, all: &BTreeMap<String, Placement>) -> Result<(), &'static str> {
+    fs::create_dir_all(path.parent().ok_or("sessionError")?).map_err(|_| "sessionError")?;
+    let pending = path.with_extension("tmp");
+    fs::write(&pending, serde_json::to_vec(all).map_err(|_| "sessionError")?).map_err(|_| "sessionError")?;
+    fs::rename(pending, path).map_err(|_| "sessionError")
 }
 
-fn restore_placement(shell: &WebviewWindow, key: &str, startup: StartupPlacement) {
+fn remembered_placement(all: &mut BTreeMap<String, Placement>, key: &str, legacy: &[String]) -> Option<Placement> {
+    if let Some(placement) = all.get(key) { return Some(*placement); }
+    let placement = legacy.iter().find_map(|old| all.get(old)).copied()?;
+    all.insert(key.to_owned(), placement);
+    Some(placement)
+}
+
+#[tauri::command]
+pub(crate) fn last_mirror_placement(
+    app: AppHandle, serial: String, hardware: String, legacy_serials: Option<Vec<String>>,
+) -> Result<Option<Placement>, &'static str> {
+    if hardware.trim().is_empty() { return Err("deviceVerifying"); }
+    let key = serde_json::to_string(&(format!("hardware:{hardware}"), Option::<String>::None)).map_err(|_| "sessionError")?;
+    let legacy = std::iter::once(serial).chain(legacy_serials.unwrap_or_default()).map(|serial|
+        serde_json::to_string(&(serial, Option::<String>::None)).map_err(|_| "sessionError")
+    ).collect::<Result<Vec<_>, _>>()?;
+    let _lock = PLACEMENTS.lock().map_err(|_| "sessionError")?;
+    let path = placement_path(&app)?;
+    let mut all = read_placements(&path);
+    let existed = all.contains_key(&key);
+    let placement = remembered_placement(&mut all, &key, &legacy);
+    if !existed && placement.is_some() { write_placements(&path, &all)?; }
+    Ok(placement)
+}
+
+fn restore_placement(shell: &WebviewWindow, key: &str, legacy: &[String], startup: StartupPlacement) {
     let saved = PLACEMENTS.lock().ok().and_then(|_lock| {
         let path = placement_path(shell.app_handle()).ok()?;
-        read_placements(&path).get(key).copied()
+        let mut all = read_placements(&path);
+        let existed = all.contains_key(key);
+        let placement = remembered_placement(&mut all, key, legacy);
+        if !existed && placement.is_some() { let _ = write_placements(&path, &all); }
+        placement
     });
     let (Ok(default_pos), Ok(default_size)) = (shell.outer_position(), shell.inner_size()) else { return; };
     let Ok(monitors) = shell.available_monitors() else { return; };
-    let visible = |placement: Placement| monitors.iter().any(|monitor| {
+    let work_area = |monitor: &tauri::Monitor| {
         let area = monitor.work_area();
-        let left = i64::from(area.position.x);
-        let top = i64::from(area.position.y);
-        let x = i64::from(placement.x);
-        let y = i64::from(placement.y);
-        x + i64::from(placement.width) >= left + 100 && x <= left + i64::from(area.size.width) - 100
-            && y >= top && y <= top + i64::from(area.size.height) - 38
-    });
+        Placement { x: area.position.x, y: area.position.y, width: area.size.width, height: area.size.height }
+    };
+    let visible_monitor = |placement: Placement| monitors.iter()
+        .max_by_key(|monitor| placement.overlap(work_area(monitor)))
+        .filter(|monitor| placement.overlap(work_area(monitor)) > 0);
     let saved = saved.filter(|p| (150..=16384).contains(&p.width)
-        && (150..=16384).contains(&p.height) && visible(*p));
-    if saved.is_none() && startup.is_empty() {
-        return;
-    }
-    let base = saved.unwrap_or(Placement {
+        && (150..=16384).contains(&p.height));
+    let default = Placement {
         x: default_pos.x, y: default_pos.y, width: default_size.width, height: default_size.height,
-    });
+    };
+    let base = saved.unwrap_or(default);
     let requested = Placement {
         x: startup.startup_x.unwrap_or(base.x),
         y: startup.startup_y.unwrap_or(base.y),
         width: startup.startup_width.unwrap_or(base.width),
         height: startup.startup_height.unwrap_or(base.height),
     };
-    let position = if visible(requested) {
-        Some((requested.x, requested.y))
-    } else {
-        saved.filter(|saved| visible(Placement { x: saved.x, y: saved.y, ..requested }))
-            .map(|saved| (saved.x, saved.y))
-    };
-    let custom_size = startup.startup_width.is_some() || startup.startup_height.is_some();
-    if custom_size {
-        let _ = shell.set_min_size(Some(PhysicalSize::new(160, 310)));
-    }
+    let Some(destination) = visible_monitor(requested)
+        .or_else(|| visible_monitor(default)).or_else(|| monitors.first()) else { return; };
+    let area = work_area(destination);
+    let target = requested.fit_within(area, destination.scale_factor());
     if let Ok(hwnd) = shell.hwnd() {
         let hwnd = hwnd.0 as usize;
-        let (x, y) = position.unwrap_or_default();
-        let mut flags = SWP_NOACTIVATE | SWP_NOZORDER;
-        if position.is_none() { flags |= SWP_NOMOVE; }
-        if saved.is_none() && !custom_size { flags |= SWP_NOSIZE; }
-        // Apply the complete physical rectangle before showing the undecorated window.
+        // Moving first lets the destination monitor apply its DPI before restoring
+        // the saved physical dimensions. Both calls run while the shell is hidden.
         let _ = shell.run_on_main_thread(move || unsafe {
-            SetWindowPos(hwnd as HWND, std::ptr::null_mut(), x, y,
-                requested.width as i32, requested.height as i32, flags);
+            SetWindowPos(hwnd as HWND, std::ptr::null_mut(), target.x, target.y,
+                0, 0, SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE);
+            SetWindowPos(hwnd as HWND, std::ptr::null_mut(), target.x, target.y,
+                target.width as i32, target.height as i32, SWP_NOACTIVATE | SWP_NOZORDER);
         });
     }
 }
@@ -110,11 +162,7 @@ pub(crate) fn save_placement(shell: &WebviewWindow, mirror: &Mirror) -> Result<(
     let path = placement_path(shell.app_handle())?;
     let mut all = read_placements(&path);
     all.insert(mirror.placement_key.clone(), placement);
-    let parent = path.parent().ok_or("sessionError")?;
-    fs::create_dir_all(parent).map_err(|_| "sessionError")?;
-    let pending = path.with_extension("tmp");
-    fs::write(&pending, serde_json::to_vec(&all).map_err(|_| "sessionError")?).map_err(|_| "sessionError")?;
-    fs::rename(pending, path).map_err(|_| "sessionError")
+    write_placements(&path, &all)
 }
 
 static NEXT_WINDOW: AtomicU64 = AtomicU64::new(1);
@@ -182,7 +230,50 @@ fn texture_size(line: &str) -> Option<(u16, u16)> {
 
 #[cfg(test)]
 mod tests {
-    use super::texture_size;
+    use super::{Placement, remembered_placement, texture_size};
+
+    #[test]
+    fn legacy_placement_uses_logical_limits_at_the_destination_scale() {
+        let saved = Placement { x: -240, y: 12, width: 160, height: 450 };
+        let actual = saved.at_least_minimum(1.25);
+        assert_eq!((actual.x, actual.y, actual.width, actual.height), (-240, 12, 360, 450));
+        let actual = saved.at_least_minimum(1.5);
+        assert_eq!((actual.width, actual.height), (432, 465));
+    }
+
+    #[test]
+    fn restore_chooses_the_monitor_with_the_largest_visible_area() {
+        let screens = [
+            Placement { x: -1080, y: 0, width: 1080, height: 1920 },
+            Placement { x: 0, y: 0, width: 2560, height: 1400 },
+        ];
+        let saved = Placement { x: -80, y: 100, width: 900, height: 1000 };
+        let destination = screens.iter().max_by_key(|screen| saved.overlap(**screen)).unwrap();
+        assert_eq!(destination.x, 0);
+        assert_eq!(saved.fit_within(*destination, 1.5).x, 0);
+    }
+
+    #[test]
+    fn disconnected_monitor_and_oversized_windows_restore_fully_visible() {
+        let screen = Placement { x: 0, y: 40, width: 1920, height: 1040 };
+        let missing_screen = Placement { x: -1700, y: 1500, width: 900, height: 2000 };
+        assert_eq!(missing_screen.overlap(screen), 0);
+        let restored = missing_screen.fit_within(screen, 1.25);
+        assert_eq!((restored.x, restored.y, restored.width, restored.height), (0, 40, 900, 1040));
+        let narrow = Placement { x: 1900, y: 1040, width: 160, height: 320 }.fit_within(screen, 1.5);
+        assert_eq!((narrow.x, narrow.y, narrow.width, narrow.height), (1488, 615, 432, 465));
+    }
+
+    #[test]
+    fn placement_migrates_only_known_aliases_and_keeps_the_stable_value() {
+        let old = Placement { x: 120, y: 80, width: 720, height: 900 };
+        let mut all = std::collections::BTreeMap::from([("old-port".to_owned(), old)]);
+        assert!(remembered_placement(&mut all, "phone", &["another-port".to_owned()]).is_none());
+        assert_eq!(remembered_placement(&mut all, "phone", &["old-port".to_owned()]).unwrap().x, 120);
+        all.get_mut("old-port").unwrap().x = 999;
+        assert_eq!(remembered_placement(&mut all, "phone", &["old-port".to_owned()]).unwrap().x, 120);
+        assert_eq!(remembered_placement(&mut all, "phone", &[]).unwrap().width, 720);
+    }
 
     #[test]
     fn reads_video_dimensions_from_software_and_hardware_renderers() {
@@ -201,11 +292,12 @@ pub(crate) struct Mirror {
     pub startup_position: (i32, i32),
     pub options: MirrorOptions,
     placement_key: String,
+    legacy_placement_keys: Vec<String>,
     bounds: Arc<Mutex<Option<VideoBounds>>>,
 }
 
 impl Mirror {
-    pub fn new(video: HWND, options: MirrorOptions, placement_key: String) -> Result<Self, &'static str> {
+    pub fn new(video: HWND, options: MirrorOptions, placement_key: String, legacy_placement_keys: Vec<String>) -> Result<Self, &'static str> {
         let mut bounds = RECT::default();
         let mut screen = RECT::default();
         if unsafe { GetClientRect(video, &mut bounds) == 0 || GetWindowRect(video, &mut screen) == 0 } {
@@ -216,6 +308,7 @@ impl Mirror {
             video: video as usize,
             options,
             placement_key,
+            legacy_placement_keys,
             bounds: Arc::default(),
             original_size: (bounds.right.max(1), bounds.bottom.max(1)),
             startup_position: (screen.left, screen.top),
@@ -239,8 +332,8 @@ pub(crate) fn create(app: &AppHandle, mirror: &Mirror, title: &str) -> Result<()
         .disable_drag_drop_handler()
         .transparent(true)
         .shadow(false)
-        .inner_size((height * ratio + 56.0).max(276.0), height + 38.0)
-        .min_inner_size(160.0, 310.0)
+        .inner_size((height * ratio + 56.0).max(f64::from(MINIMUM_WIDTH)), (height + 38.0).max(f64::from(MINIMUM_HEIGHT)))
+        .min_inner_size(f64::from(MINIMUM_WIDTH), f64::from(MINIMUM_HEIGHT))
         .always_on_top(mirror.options.top)
         .fullscreen(mirror.options.fullscreen)
         .visible(false)
@@ -292,7 +385,7 @@ pub(crate) fn create(app: &AppHandle, mirror: &Mirror, title: &str) -> Result<()
         }
     });
     if !mirror.options.fullscreen {
-        restore_placement(&shell, &mirror.placement_key, mirror.options.startup);
+        restore_placement(&shell, &mirror.placement_key, &mirror.legacy_placement_keys, mirror.options.startup);
     }
     shell.show().map_err(|_| "mirrorFrameFailed")?;
     let _ = shell.set_focus();
@@ -530,8 +623,8 @@ fn install_move_handler(shell: &WebviewWindow, host: HWND, video: usize) -> Resu
             unsafe { RemoveWindowSubclass(host, Some(on_message), id); }
         }
         let result = unsafe { DefSubclassProc(host, message, wparam, lparam) };
-        if message == WM_EXITSIZEMOVE {
-            // Run after the system's modal move loop gives up the title-bar focus.
+        if message == WM_EXITSIZEMOVE || message == WM_DPICHANGED {
+            // Run after the system completes its move loop or monitor-scale resize.
             unsafe { PostMessageW(host, RESTORE_INPUT, 0, 0); }
         } else if message == RESTORE_INPUT {
             let video = video as HWND;

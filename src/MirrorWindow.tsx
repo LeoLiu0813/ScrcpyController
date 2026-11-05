@@ -6,10 +6,10 @@ import { flushSync } from "react-dom";
 import { useEffect, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
-import { currentMonitor, getCurrentWindow, LogicalSize, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/window";
+import { currentMonitor, getCurrentWindow, LogicalSize, PhysicalPosition, PhysicalSize, primaryMonitor } from "@tauri-apps/api/window";
 import { getInitialLocale, locales, type Message } from "./locales";
-import { deviceStorageKey } from "./deviceAliases";
 import { loadMap, type Shortcut } from "./Workflows";
+import { mirrorMinimumHeight as minimumHeight, mirrorMinimumWidth as minimumWidth } from "./mirrorSizing";
 import "./MirrorWindow.css";
 
 const icons = {
@@ -25,7 +25,8 @@ type Layout = {
   opacity: number; visible: boolean; rail: Action[]; more: Action[];
   buttonColor: string; buttonOpacity: number; frameBorder: number; pictureRadius: number;
 };
-type MirrorInfo = [title: string, width: number, height: number, serial: string, virtual: boolean, follow: boolean, recording: boolean];
+type MirrorInfo = [title: string, width: number, height: number, serial: string, virtual: boolean, follow: boolean,
+  recording: boolean, hardware: string | null];
 
 const initial: Layout = {
   opacity: 88, visible: true, buttonColor: "#2a2b36", buttonOpacity: 100, frameBorder: 3, pictureRadius: 5,
@@ -193,9 +194,20 @@ export function MirrorAppearance({ t }: { t: (key: Message) => string }) {
 type Drop = { zone: Zone; before?: Action; after?: boolean };
 
 type ToolbarRequest = { id: number; operation: string; args: string[] };
+type PixelLimit = { viewportWidth: number; viewportHeight: number; frameWidth: number; frameHeight: number };
+
+function fitPicture(width: number, height: number, frameWidth: number, frameHeight: number, upscale: boolean) {
+  // Match scrcpy's integer aspect fit to avoid exposing its clear color along an edge.
+  return {
+    width: Math.min(width, Math.floor(height * frameWidth / frameHeight), upscale ? Infinity : frameWidth),
+    height: Math.min(height, Math.floor(width * frameHeight / frameWidth), upscale ? Infinity : frameHeight),
+  };
+}
+
 const menuWidth = 64;
 const sidebarWidth = 53;
-const minimumWidth = 160;
+const baseMinimumSize = new LogicalSize(minimumWidth, minimumHeight);
+const expandedMinimumSize = new LogicalSize(minimumWidth + menuWidth, minimumHeight);
 
 export default function MirrorWindow() {
   const [shell] = useState(getCurrentWindow);
@@ -238,6 +250,9 @@ export default function MirrorWindow() {
   const [paused, setPaused] = useState(false);
   const [screenOff, setScreenOff] = useState(false);
   const [caption, setCaption] = useState("");
+  const [sizingNotice, setSizingNotice] = useState<Message>();
+  const sizingNoticeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const [pixelLimit, setPixelLimit] = useState<PixelLimit>();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const layout = useLayout();
@@ -245,6 +260,7 @@ export default function MirrorWindow() {
   const picturePadding = pictureStartInset + layout.frameBorder;
   const sidebarEnabled = sidebarOverride ?? layout.visible;
   const t = (key: Message) => locales[locale][key];
+  const titleCaption = sizingNotice ? t(sizingNotice) : caption;
 
   useEffect(() => {
     const syncLocale = () => setLocale(getInitialLocale());
@@ -263,27 +279,30 @@ export default function MirrorWindow() {
     invoke<MirrorInfo>("mirror_info").then(setInfo).catch(() => setError("mirrorFrameFailed"));
     return () => {
       window.removeEventListener("storage", syncLocale);
+      clearTimeout(sizingNoticeTimer.current);
       void bridge.then((unlisten) => unlisten());
       void blur.then((unlisten) => unlisten()).catch(() => {});
     };
   }, []);
 
   const serial = info?.[4] ? undefined : info?.[3];
+  const hardware = info?.[7] ?? undefined;
+  const deviceKey = hardware ? `hardware:${hardware}` : undefined;
   const windowTitle = deviceTitle ?? info?.[0];
   const [baseWidth, baseHeight] = (ready ? frameSize : undefined) ?? [info?.[1] ?? 1, info?.[2] ?? 1];
   const [sourceWidth, sourceHeight] = landscape ? [baseHeight, baseWidth] : [baseWidth, baseHeight];
   useEffect(() => {
-    if (!serial) return;
+    if (!serial || !deviceKey) return;
     const sync = () => {
-      const key = deviceStorageKey(serial, loadMap<string>("device-identities"));
-      const name = loadMap<string>("device-aliases")[key]
-        || loadMap<{ model: string }>("known-devices")[serial]?.model;
+      const name = loadMap<string>("device-aliases")[deviceKey]
+        || (loadMap<string>("device-identities")[serial] === hardware
+          ? loadMap<{ model: string }>("known-devices")[serial]?.model : undefined);
       setDeviceTitle(name);
     };
     sync();
     window.addEventListener("storage", sync);
     return () => window.removeEventListener("storage", sync);
-  }, [serial]);
+  }, [serial, hardware, deviceKey]);
   useEffect(() => {
     if (windowTitle) void shell.setTitle(windowTitle).catch(() => {});
   }, [shell, windowTitle]);
@@ -309,39 +328,37 @@ export default function MirrorWindow() {
     return () => { active = false; clearInterval(timer); };
   }, [info]);
   useEffect(() => {
-    if (!serial) return;
+    if (!serial || !deviceKey) return;
     const sync = () => {
-      const key = deviceStorageKey(serial, loadMap<string>("device-identities"));
-      setApps(loadMap<Shortcut[]>("phone-app-shortcuts")[key] ?? []);
-      setAppIcons(loadMap<Record<string, string>>("phone-shortcut-icons")[key] ?? {});
+      setApps(loadMap<Shortcut[]>("phone-app-shortcuts")[deviceKey] ?? []);
+      setAppIcons(loadMap<Record<string, string>>("phone-shortcut-icons")[deviceKey] ?? {});
     };
     sync();
     window.addEventListener("storage", sync);
     return () => window.removeEventListener("storage", sync);
-  }, [serial]);
+  }, [serial, deviceKey]);
 
   useEffect(() => {
-    if (!serial) return;
+    if (!serial || !hardware || !deviceKey) return;
     for (const { app } of apps) {
       if (appIcons[app.package] || iconRequests.current.has(app.package)) continue;
       iconRequests.current.add(app.package);
-      void invoke<string>("app_icon", { serial, package: app.package }).then((icon) => {
+      void invoke<string>("app_icon", { serial, hardware, package: app.package }).then((icon) => {
         const cache = loadMap<Record<string, string>>("phone-shortcut-icons");
-        const key = deviceStorageKey(serial, loadMap<string>("device-identities"));
-        cache[key] = { ...cache[key], [app.package]: icon };
-        setAppIcons(cache[key]);
+        cache[deviceKey] = { ...cache[deviceKey], [app.package]: icon };
+        setAppIcons(cache[deviceKey]);
         try { localStorage.setItem("phone-shortcut-icons", JSON.stringify(cache)); } catch { /* 图标仍在当前窗口显示。 */ }
       }).catch(() => {});
     }
-  }, [serial, apps, appIcons]);
+  }, [serial, hardware, deviceKey, apps, appIcons]);
 
   async function launchShortcut(shortcut: Shortcut) {
-    if (!info || launchingApp) return;
+    if (!info || !hardware || launchingApp) return;
     setError("");
     setLaunchingApp(shortcut.app.package);
     try {
       await invoke("open_app_window", {
-        serial: info[3], package: shortcut.app.package,
+        serial: info[3], hardware, package: shortcut.app.package,
         title: `${shortcut.app.name || shortcut.app.package} · ${windowTitle ?? info[0]}`,
         display: shortcut.display,
       });
@@ -420,9 +437,12 @@ export default function MirrorWindow() {
         const left = pixels(rect.left), top = pixels(rect.top);
         const availableWidth = pixels(rect.right) - left;
         const availableHeight = pixels(rect.bottom) - top;
-        // Match scrcpy's integer aspect fit to avoid exposing its clear color along an edge.
-        const width = info[5] ? availableWidth : Math.min(availableWidth, Math.floor(availableHeight * sourceWidth / sourceHeight));
-        const height = info[5] ? availableHeight : Math.min(availableHeight, Math.floor(availableWidth * sourceHeight / sourceWidth));
+        const limitUpscaling = pixelLimit?.frameWidth === sourceWidth && pixelLimit.frameHeight === sourceHeight
+          && Math.abs(availableWidth - pixelLimit.viewportWidth) <= 1
+          && Math.abs(availableHeight - pixelLimit.viewportHeight) <= 1;
+        const { width, height } = info[5]
+          ? { width: availableWidth, height: availableHeight }
+          : fitPicture(availableWidth, availableHeight, sourceWidth, sourceHeight, !limitUpscaling);
         const bounds = {
           x: left + Math.round((availableWidth - width) / 2),
           y: top + Math.round((availableHeight - height) / 2),
@@ -445,15 +465,19 @@ export default function MirrorWindow() {
     };
     const observer = new ResizeObserver(update);
     observer.observe(viewport.current);
+    // A cross-monitor DPI change can retain the logical viewport dimensions.
+    // Recompute its physical bounds even when ResizeObserver has no size change.
+    const scaleChange = shell.onScaleChanged(update);
     window.addEventListener("resize", update);
     update();
     return () => {
       stopped = true;
       observer.disconnect();
+      void scaleChange.then((unlisten) => unlisten()).catch(() => {});
       window.removeEventListener("resize", update);
       cancelAnimationFrame(frame);
     };
-  }, [info, sourceWidth, sourceHeight, layout.pictureRadius]);
+  }, [info, sourceWidth, sourceHeight, layout.pictureRadius, pixelLimit]);
 
   async function savePlacement() {
     if (priming.current || menuPending.current || extension.current) return;
@@ -523,8 +547,11 @@ export default function MirrorWindow() {
           if (expandedLeft !== position.x) await shell.setPosition(new PhysicalPosition(expandedLeft, position.y));
           try {
             await shell.setSize(new PhysicalSize(size.width + width, size.height));
+            await shell.setMinSize(expandedMinimumSize);
             await waitWidth((size.width + width) / scale);
           } catch (error) {
+            await shell.setMinSize(baseMinimumSize).catch(() => {});
+            await shell.setSize(size).catch(() => {});
             if (expandedLeft !== position.x) await shell.setPosition(position);
             throw error;
           }
@@ -539,8 +566,14 @@ export default function MirrorWindow() {
         const saved = extension.current;
         const [size, position, scale] = await Promise.all([shell.innerSize(), shell.outerPosition(), shell.scaleFactor()]);
         flushSync(() => setLockedWidth(widthBefore));
-        const width = Math.max(Math.round(minimumWidth * scale), size.width - Math.round(menuWidth * scale));
-        await shell.setSize(new PhysicalSize(width, size.height));
+        const width = Math.max(Math.ceil(minimumWidth * scale), size.width - Math.round(menuWidth * scale));
+        await shell.setMinSize(baseMinimumSize);
+        try {
+          await shell.setSize(new PhysicalSize(width, size.height));
+        } catch (error) {
+          await shell.setMinSize(expandedMinimumSize).catch(() => {});
+          throw error;
+        }
         await waitWidth(width / scale);
         flushSync(() => { setOpen(false); setOutside(false); });
         extension.current = undefined;
@@ -589,12 +622,14 @@ export default function MirrorWindow() {
       const width = info[5] ? box.width : Math.min(box.width, box.height * ratio);
       const height = info[5] ? box.height : Math.min(box.height, box.width / ratio);
       const [scale, origin] = await Promise.all([shell.scaleFactor(), shell.outerPosition()]);
-      const target = new PhysicalSize(
-        Math.round((width + picturePadding + (next ? sidebarWidth : 0)) * scale),
-        Math.round((height + (frame?.height ?? innerHeight) - box.height) * scale),
-      );
-      const dx = Math.round((box.x + (box.width - width) / 2) * scale) - Math.round(pictureStartInset * scale);
-      const dy = Math.round((box.y + (box.height - height) / 2) * scale) - Math.round(box.y * scale);
+      const requestedWidth = Math.round((width + picturePadding + (next ? sidebarWidth : 0)) * scale);
+      const requestedHeight = Math.round((height + (frame?.height ?? innerHeight) - box.height) * scale);
+      const target = new PhysicalSize(Math.max(requestedWidth, Math.ceil(minimumWidth * scale)),
+        Math.max(requestedHeight, Math.ceil(minimumHeight * scale)));
+      const dx = Math.round((box.x + (box.width - width) / 2) * scale) - Math.round(pictureStartInset * scale)
+        - (info[5] ? 0 : Math.round((target.width - requestedWidth) / 2));
+      const dy = Math.round((box.y + (box.height - height) / 2) * scale) - Math.round(box.y * scale)
+        - (info[5] ? 0 : Math.round((target.height - requestedHeight) / 2));
       flushSync(() => { setLockedPicture([width, height]); setSidebarOverride(next); });
       try {
         await Promise.all([
@@ -633,6 +668,59 @@ export default function MirrorWindow() {
     return t((`mirror_${action}`) as Message);
   };
 
+  function showSizingNotice(message?: Message) {
+    clearTimeout(sizingNoticeTimer.current);
+    setSizingNotice(message);
+    if (message) sizingNoticeTimer.current = setTimeout(() => setSizingNotice(undefined), 4500);
+  }
+
+  async function showOriginalPixels() {
+    if (!info || !viewport.current) return;
+    if (moreOpen.current) await changeMore(false);
+    if (info[5]) {
+      // In follow mode the virtual display already matches the native viewport.
+      showSizingNotice("mirrorActualFollow");
+      return;
+    }
+    if (!frameSize) {
+      showSizingNotice("mirrorActualWaiting");
+      return;
+    }
+    const [frameWidth, frameHeight] = landscape ? [frameSize[1], frameSize[0]] : frameSize;
+    if (await shell.isFullscreen()) {
+      await shell.setFullscreen(false);
+      flushSync(() => { setFullscreen(false); setReveal(false); });
+    }
+    if (await shell.isMaximized()) await shell.toggleMaximize();
+    const [monitor, position, scale, inner, outer] = await Promise.all([
+      currentMonitor(), shell.outerPosition(), shell.scaleFactor(), shell.innerSize(), shell.outerSize(),
+    ]);
+    const workArea = monitor?.workArea ?? (await primaryMonitor())?.workArea;
+    const windowBounds = document.querySelector(".mirror-shell")?.getBoundingClientRect();
+    const videoBounds = viewport.current?.getBoundingClientRect();
+    if (!workArea || !windowBounds || !videoBounds) throw "mirrorFrameFailed";
+    const pixels = (n: number) => Math.round(n * window.devicePixelRatio);
+    const chromeWidth = pixels(videoBounds.left) - pixels(windowBounds.left)
+      + pixels(windowBounds.right) - pixels(videoBounds.right);
+    const chromeHeight = pixels(videoBounds.top) - pixels(windowBounds.top)
+      + pixels(windowBounds.bottom) - pixels(videoBounds.bottom);
+    const borderWidth = Math.max(0, outer.width - inner.width);
+    const borderHeight = Math.max(0, outer.height - inner.height);
+    const maxWidth = workArea.size.width - borderWidth;
+    const maxHeight = workArea.size.height - borderHeight;
+    const availableWidth = Math.max(1, maxWidth - chromeWidth);
+    const availableHeight = Math.max(1, maxHeight - chromeHeight);
+    const picture = fitPicture(availableWidth, availableHeight, frameWidth, frameHeight, false);
+    const width = Math.min(maxWidth, Math.max(Math.ceil(minimumWidth * scale), picture.width + chromeWidth));
+    const height = Math.min(maxHeight, Math.max(Math.ceil(minimumHeight * scale), picture.height + chromeHeight));
+    setPixelLimit({ frameWidth, frameHeight, viewportWidth: width - chromeWidth, viewportHeight: height - chromeHeight });
+    await shell.setSize(new PhysicalSize(width, height));
+    const x = Math.max(workArea.position.x, Math.min(position.x, workArea.position.x + maxWidth - width));
+    const y = Math.max(workArea.position.y, Math.min(position.y, workArea.position.y + maxHeight - height));
+    if (x !== position.x || y !== position.y) await shell.setPosition(new PhysicalPosition(x, y));
+    if (picture.width !== frameWidth || picture.height !== frameHeight) showSizingNotice("mirrorActualScaled");
+  }
+
   async function act(action: Action) {
     if (dragRef.current || busy) throw "mirrorActionFailed";
     setError("");
@@ -643,17 +731,22 @@ export default function MirrorWindow() {
         await shell.setFullscreen(!fullscreen);
         setFullscreen(!fullscreen);
         setReveal(false);
-      } else if (action === "actual" || action === "fit") {
+      } else if (action === "actual") {
+        showSizingNotice();
+        await showOriginalPixels();
+      } else if (action === "fit") {
+        showSizingNotice();
+        setPixelLimit(undefined);
         if (!info || !viewport.current) return;
         if (more) await changeMore(false);
         const box = viewport.current.getBoundingClientRect();
         const ratio = sourceWidth / sourceHeight;
-        const width = action === "actual" ? info[landscape ? 2 : 1] / devicePixelRatio : Math.min(box.width, box.height * ratio);
+        const width = Math.min(box.width, box.height * ratio);
         const shellBox = document.querySelector(".mirror-shell")?.getBoundingClientRect();
         const scale = await shell.scaleFactor();
         await shell.setSize(new PhysicalSize(
-          Math.round((width + (shellBox?.width ?? innerWidth) - box.width) * scale),
-          Math.round((width / ratio + (shellBox?.height ?? innerHeight) - box.height) * scale),
+          Math.max(Math.ceil(minimumWidth * scale), Math.round((width + (shellBox?.width ?? innerWidth) - box.width) * scale)),
+          Math.max(Math.ceil(minimumHeight * scale), Math.round((width / ratio + (shellBox?.height ?? innerHeight) - box.height) * scale)),
         ));
       } else {
         const result = await invoke("mirror_action", { action:
@@ -746,6 +839,7 @@ export default function MirrorWindow() {
         const appList = document.querySelector(".mirror-apps");
         const button = document.querySelector(".mirror-list .icon-button") ?? document.querySelector(".mirror-toolbar > button");
         return { layout: readLayout(), fullscreen: await shell.isFullscreen(), more, outside,
+          scaleFactor: await shell.scaleFactor(), pixelRatio: window.devicePixelRatio, monitor: await currentMonitor(),
           shell: box(".mirror-shell"), rail: box(".mirror-toolbar"), menu: box(".mirror-more"),
           pinned: await shell.isAlwaysOnTop(), sidebar: sidebarEnabled, appCount: apps.length,
           appScroll: appList ? { height: appList.clientHeight, content: appList.scrollHeight } : null,
@@ -755,6 +849,7 @@ export default function MirrorWindow() {
           captionButtons: Array.from(document.querySelectorAll(".mirror-caption-actions .icon-button"), rect),
           virtual: !!info?.[4], follow: !!info?.[5], ready,
           title: windowTitle,
+          caption: titleCaption,
           sourceSize: info ? [sourceWidth, sourceHeight] : null,
           videoViewport: box(".mirror-video-viewport"),
           error };
@@ -872,9 +967,9 @@ export default function MirrorWindow() {
       case "resize": {
         const [a, b] = args.map(Number);
         if (args.length !== 2 || !Number.isInteger(a) || !Number.isInteger(b) || Math.abs(a) > 16000 || Math.abs(b) > 16000
-          || (operation === "resize" && (a < minimumWidth || b < 310))) throw "invalidArguments";
+          || (operation === "resize" && (a < 160 || b < minimumHeight))) throw "invalidArguments";
         if (operation === "move") await shell.setPosition(new PhysicalPosition(a, b));
-        else await shell.setSize(new LogicalSize(a, b));
+        else await shell.setSize(new LogicalSize(Math.max(a, outside ? expandedMinimumSize.width : minimumWidth), b));
         await savePlacement();
         return null;
       }
@@ -914,7 +1009,7 @@ export default function MirrorWindow() {
         <span data-tauri-drag-region>{windowTitle ?? t("mirrorStarting")}</span>
         {info?.[6] && <span className="mirror-recording" data-tauri-drag-region>● {t("recordingActive")}</span>}
       </span>
-      <span className="mirror-caption" data-tauri-drag-region>{caption}</span>
+      <span className="mirror-caption" title={sizingNotice ? titleCaption : undefined} data-tauri-drag-region>{titleCaption}</span>
       <div className="mirror-caption-actions">
         <button type="button" className="icon-button" aria-expanded={sidebarEnabled}
           {...tip(t(sidebarEnabled ? "mirrorCollapseSidebar" : "mirrorExpandSidebar"))}
@@ -937,7 +1032,7 @@ export default function MirrorWindow() {
       </div>
     </div>}
     {fullscreen && reveal && <div className="mirror-fullscreen-tips">
-      {caption && <span>{caption}</span>}
+      {titleCaption && <span>{titleCaption}</span>}
     </div>}
     <div className="mirror-body">
       <div className="mirror-video" style={lockedPicture ? {

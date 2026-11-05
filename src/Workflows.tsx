@@ -5,12 +5,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { AudioLines, Camera, FolderUp, ScanSearch, SlidersHorizontal, Video } from "lucide-react";
 import { type Message } from "./locales";
 import ErrorToast from "./ErrorToast";
-import { deviceStorageKey, legacyDeviceKeys } from "./deviceAliases";
+import { legacyDeviceKeys, preserveUnboundRecord } from "./deviceAliases";
 import PhoneAppPicker from "./PhoneAppPicker";
+import { saveLocalStorage } from "./localStorage";
 
 export type Translate = (key: Message) => string;
 export type Device = {
   serial: string;
+  hardware?: string | null;
+  transportId?: string | null;
   model: string;
   connection: "wired" | "wireless";
   status: "online" | "offline" | "unauthorized" | "unavailable";
@@ -84,17 +87,21 @@ function StartupGeometryField({ label, value, remembered, min, max, hint, error,
   </label>;
 }
 
-function StartupGeometry({ serial, profile, update, t }: {
-  serial: string; profile: Profile; update: (profile: Profile) => void; t: Translate;
+function StartupGeometry({ serial, hardware, profile, update, t }: {
+  serial: string; hardware?: string; profile: Profile; update: (profile: Profile) => void; t: Translate;
 }) {
   const [remembered, setRemembered] = useState<RememberedPlacement>();
   useEffect(() => {
     let active = true;
     setRemembered(undefined);
-    void invoke<RememberedPlacement | null>("last_mirror_placement", { serial })
+    const identities = loadMap<string>("device-identities");
+    const expectedHardware = hardware ?? identities[serial];
+    if (!expectedHardware) return;
+    const legacySerials = Object.keys(identities).filter((endpoint) => identities[endpoint] === expectedHardware);
+    void invoke<RememberedPlacement | null>("last_mirror_placement", { serial, hardware: expectedHardware, legacySerials })
       .then((placement) => { if (active) setRemembered(placement ?? undefined); }).catch(() => {});
     return () => { active = false; };
-  }, [serial]);
+  }, [serial, hardware]);
   return <div className="device-settings-subsection settings-stack">
     <h3>{t("startupGeometry")}</h3>
     {placementRows.map(([group, fields]) => <fieldset className="startup-geometry-row" key={group}>
@@ -102,16 +109,16 @@ function StartupGeometry({ serial, profile, update, t }: {
       <div className="field-grid">
         {fields.map(([key, rememberedKey, min, max]) => <StartupGeometryField key={key}
           label={t(key)} value={profile[key]} remembered={remembered?.[rememberedKey]} min={min} max={max}
-          hint={t("startupGeometryHint")} error={t("invalidStartupPlacement")}
+          hint={t(group === "startupSize" ? "startupSizeHint" : "startupGeometryHint")} error={t("invalidStartupPlacement")}
           update={(value) => { if (value !== profile[key]) update({ ...profile, [key]: value }); }} />)}
       </div>
     </fieldset>)}
   </div>;
 }
 
-export function ProfileEditor({ section, profile, update, t, sdk, screen, serial, placementSerial }: {
+export function ProfileEditor({ section, profile, update, t, sdk, screen, serial, hardware, placementSerial }: {
   section: ProfileSection; profile: Profile; update: (profile: Profile) => void; t: Translate;
-  sdk?: number; screen?: [number, number]; serial?: string; placementSerial: string;
+  sdk?: number; screen?: [number, number]; serial?: string; hardware?: string; placementSerial: string;
 }) {
   const audioMode = profile.audioMode || (profile.mute ? "phone" : "computer");
   function number(key: "maxSize" | "maxFps" | "bitRate" | "videoBuffer" | "audioBitRate" | "audioBuffer" | "recordSeconds" | "cameraFps", max: number, disabled = false) {
@@ -158,7 +165,7 @@ export function ProfileEditor({ section, profile, update, t, sdk, screen, serial
             onChange={(event) => update({ ...profile, crop: event.target.value })} />
         </label>
       </div>
-      <CropPreview serial={serial} screen={screen} crop={profile.crop} t={t}
+      <CropPreview serial={serial} hardware={hardware} screen={screen} crop={profile.crop} t={t}
         update={(crop) => update({ ...profile, crop })} />
     </section>;
   if (section === "audioOutput") return <section className="device-settings-section">
@@ -200,7 +207,7 @@ export function ProfileEditor({ section, profile, update, t, sdk, screen, serial
       <div className="settings-check-grid">
         {toggle("top")}{toggle("fullscreen")}{toggle("screenOff")}{toggle("awake")}{toggle("readOnly")}
       </div>
-      <StartupGeometry serial={placementSerial} profile={profile} update={update} t={t} />
+      <StartupGeometry serial={placementSerial} hardware={hardware} profile={profile} update={update} t={t} />
     </section>;
   if (section === "advanced") return <section className="device-settings-section">
       <h2>{t("advanced")}</h2>
@@ -220,8 +227,8 @@ export function ProfileEditor({ section, profile, update, t, sdk, screen, serial
     </section>;
 }
 
-function CropPreview({ serial, screen, crop, update, t }: {
-  serial?: string; screen?: [number, number]; crop: string; update: (crop: string) => void; t: Translate;
+function CropPreview({ serial, hardware, screen, crop, update, t }: {
+  serial?: string; hardware?: string; screen?: [number, number]; crop: string; update: (crop: string) => void; t: Translate;
 }) {
   const [image, setImage] = useState<string>();
   const [size, setSize] = useState<[number, number]>();
@@ -249,7 +256,7 @@ function CropPreview({ serial, screen, crop, update, t }: {
     setFailure(false);
     setSize(undefined);
     try {
-      const bytes = await invoke<ArrayBuffer>("capture_crop_preview", { serial });
+      const bytes = await invoke<ArrayBuffer>("capture_crop_preview", { serial, hardware });
       setImage(URL.createObjectURL(new Blob([bytes], { type: "image/png" })));
     } catch { setFailure(true); }
     finally { setBusy(false); }
@@ -324,15 +331,22 @@ export function bindDeviceApps(serial: string, hardware: string, identities: Rec
   const key = `hardware:${hardware}`;
   let changed = false;
   function migrate<T>(storage: string, merge: (legacy: T[]) => T) {
-    const data = loadMap<T>(storage);
+    const saved = loadMap<T>(storage);
+    const data = preserveUnboundRecord(serial, hardware, identities, saved);
     const legacy = legacyDeviceKeys(serial, hardware, identities, Object.keys(data))
       .filter((candidate) => Object.prototype.hasOwnProperty.call(data, candidate));
-    if (!legacy.length) return;
-    const entries = legacy.map((candidate) => data[candidate]);
-    if (data[key] !== undefined) entries.unshift(data[key]);
-    data[key] = merge(entries);
-    for (const candidate of legacy) delete data[candidate];
-    localStorage.setItem(storage, JSON.stringify(data));
+    if (!legacy.length && data === saved) return;
+    if (legacy.length) {
+      const entries = legacy.map((candidate) => data[candidate]);
+      if (data[key] !== undefined) entries.unshift(data[key]);
+      data[key] = merge(entries);
+      for (const candidate of legacy) delete data[candidate];
+    }
+    try { saveLocalStorage(storage, JSON.stringify(data)); }
+    catch (error) {
+      if (storage !== "phone-shortcut-icons") throw error;
+      localStorage.removeItem(storage);
+    }
     changed = true;
   }
   migrate<Shortcut[]>("phone-app-shortcuts", (lists) => {
@@ -357,8 +371,8 @@ const resolutionPresets = {
   square: [1080, 1080],
 } as const;
 
-export function AppWindowPanel({ serial, deviceKey, title, screen, t }: {
-  serial?: string; deviceKey?: string; title?: string; screen?: [number, number]; t: Translate;
+export function AppWindowPanel({ serial, hardware, deviceKey, title, screen, t }: {
+  serial?: string; hardware?: string; deviceKey?: string; title?: string; screen?: [number, number]; t: Translate;
 }) {
   const [apps, setApps] = useState(() => deviceKey ? loadMap<PhoneApp[]>("phone-app-cache")[deviceKey] : undefined);
   const [shortcuts, setShortcuts] = useState(() => deviceKey ? loadMap<Shortcut[]>("phone-app-shortcuts")[deviceKey] ?? [] : []);
@@ -398,19 +412,18 @@ export function AppWindowPanel({ serial, deviceKey, title, screen, t }: {
   }, [deviceKey]);
 
   useEffect(() => {
-    if (!serial) return;
+    if (!serial || !hardware || !deviceKey) return;
     for (const { app } of shortcuts) {
       if (icons[app.package] || iconRequests.current.has(app.package)) continue;
       iconRequests.current.add(app.package);
-      void invoke<string>("app_icon", { serial, package: app.package }).then((icon) => {
+      void invoke<string>("app_icon", { serial, hardware, package: app.package }).then((icon) => {
         const cache = loadMap<Record<string, string>>("phone-shortcut-icons");
-        const key = deviceStorageKey(serial, loadMap<string>("device-identities"));
-        cache[key] = { ...cache[key], [app.package]: icon };
-        setIcons(cache[key]);
+        cache[deviceKey] = { ...cache[deviceKey], [app.package]: icon };
+        setIcons(cache[deviceKey]);
         try { localStorage.setItem("phone-shortcut-icons", JSON.stringify(cache)); } catch { /* 本次仍可显示图标。 */ }
-      }).catch(() => {});
+      }).catch(() => {}).finally(() => { iconRequests.current.delete(app.package); });
     }
-  }, [serial, shortcuts, icons]);
+  }, [serial, hardware, deviceKey, shortcuts, icons, apps]);
 
   useEffect(() => {
     if (!menu) return;
@@ -422,14 +435,14 @@ export function AppWindowPanel({ serial, deviceKey, title, screen, t }: {
   }, [menu]);
 
   async function loadApps() {
-    if (!serial || busy) return;
+    if (!serial || !hardware || !deviceKey || busy) return;
     setBusy(true);
     setMessage(undefined);
     try {
-      const entries = await invoke<PhoneApp[]>("list_apps", { serial });
+      const entries = await invoke<PhoneApp[]>("list_apps", { serial, hardware });
       const cache = loadMap<PhoneApp[]>("phone-app-cache");
-      cache[deviceStorageKey(serial, loadMap<string>("device-identities"))] = entries;
-      localStorage.setItem("phone-app-cache", JSON.stringify(cache));
+      cache[deviceKey] = entries;
+      saveLocalStorage("phone-app-cache", JSON.stringify(cache));
       setApps(entries);
       if (!entries.some((app) => app.package === selected)) setSelected("");
     } catch (error) {
@@ -440,12 +453,12 @@ export function AppWindowPanel({ serial, deviceKey, title, screen, t }: {
   }
 
   async function openApp(app: PhoneApp, options: AppDisplay) {
-    if (!serial || busy) return;
+    if (!serial || !hardware || busy) return;
     setBusy(true);
     setMessage(undefined);
     try {
       await invoke("open_app_window", {
-        serial, package: app.package, title: `${app.name || app.package} · ${title ?? serial}`,
+        serial, hardware, package: app.package, title: `${app.name || app.package} · ${title ?? serial}`,
         display: options,
       });
       setMessage({ key: "appWindowOpened", error: false });
@@ -487,10 +500,11 @@ export function AppWindowPanel({ serial, deviceKey, title, screen, t }: {
   }
 
   function saveShortcuts(next: Shortcut[]) {
-    if (!serial) return;
+    if (!serial || !hardware || !deviceKey) return;
     const saved = loadMap<Shortcut[]>("phone-app-shortcuts");
-    saved[deviceStorageKey(serial, loadMap<string>("device-identities"))] = next;
-    localStorage.setItem("phone-app-shortcuts", JSON.stringify(saved));
+    saved[deviceKey] = next;
+    try { saveLocalStorage("phone-app-shortcuts", JSON.stringify(saved)); }
+    catch (error) { setMessage({ key: error as Message, error: true }); return; }
     setShortcuts(next);
     setEditing(undefined);
     setEditorOpen(false);
@@ -631,11 +645,13 @@ function FileTools({ device, initialTarget, t, active }: {
   }
 
   async function transfer(paths: string[]) {
-    if (!device || busy || !paths.length) return;
+    if (!device?.hardware || device.status !== "online" || busy || !paths.length) return;
     setBusy(true);
     setFailure(undefined);
     try {
-      const received = await invoke<FileResult[]>("transfer_files", { serial: device.serial, files: paths, target, install });
+      const received = await invoke<FileResult[]>("transfer_files", {
+        serial: device.serial, hardware: device.hardware, files: paths, target, install,
+      });
       setResults((previous) => [...previous.filter((item) => !paths.includes(item.path)), ...received]);
     } catch (error) { setFailure(error); }
     finally { setBusy(false); }
@@ -655,7 +671,7 @@ function FileTools({ device, initialTarget, t, active }: {
     {files.length > 0 && <>
       <ul className="transfer-list">{files.map((path) => {
         const item = results.find((result) => result.path === path);
-        return <li key={path} title={item?.detail || path}><span>{path.split(/[\\/]/).pop()}</span>
+        return <li key={path} data-tip={item?.detail || path}><span>{path.split(/[\\/]/).pop()}</span>
           {item && <small className={item.success ? "status online" : "status failure"}>{t(item.success ? "fileSucceeded" : "fileFailed")}</small>}
         </li>;
       })}</ul>
@@ -705,15 +721,16 @@ export function ToolPanel({ device, profile, section, t, refresh }: {
     const serial = kind === "task" && task === "directControl"
       ? directSerial.trim() || (device?.connection === "wired" ? device.serial : "")
       : device?.serial;
-    if (!serial || busy) return;
+    const hardware = serial === device?.serial ? device?.hardware : undefined;
+    if (!serial || busy || (!hardware && (kind === "query" || task !== "directControl"))) return;
     setBusy(true);
     setResult(undefined);
     try {
       if (kind === "query") {
-        const output = await invoke<{ text: string; success: boolean }>("query_device", { serial, query: queryOverride });
+        const output = await invoke<{ text: string; success: boolean }>("query_device", { serial, hardware, query: queryOverride });
         setResult({ serial, text: output.text, error: output.success ? undefined : "queryFailed" });
       } else {
-        const text = await invoke<string | null>("run_tool", { serial, task, seconds,
+        const text = await invoke<string | null>("run_tool", { serial, hardware, task, seconds,
           folder: records ? folder : null, format: records ? format : null,
           audioSource: task === "audioRecord" ? audioSource : null, profile: task === "cameraMirror" ? camera : null,
         });

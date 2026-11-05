@@ -66,6 +66,8 @@ pub(crate) struct StartupPlacement {
 
 impl StartupPlacement {
     pub(crate) fn validate(self) -> Result<()> {
+        // Older profiles use physical pixels. Keep their values valid and
+        // apply the logical window minimum at the destination monitor's scale.
         if self.startup_width.is_some_and(|width| !(160..=16384).contains(&width))
             || self.startup_height.is_some_and(|height| !(310..=16384).contains(&height))
         {
@@ -74,10 +76,6 @@ impl StartupPlacement {
         Ok(())
     }
 
-    pub(crate) fn is_empty(self) -> bool {
-        self.startup_x.is_none() && self.startup_y.is_none()
-            && self.startup_width.is_none() && self.startup_height.is_none()
-    }
 }
 
 pub fn name(alias: Option<String>, model: String) -> Result<String> {
@@ -420,7 +418,9 @@ mod tests {
         assert_eq!(profile.startup.startup_height, None);
         assert!(profile.startup.validate().is_ok());
         assert_eq!(profile.extra_args, ["--max-fps=30"]);
-        assert!(Profile::default().startup.is_empty());
+        let startup = Profile::default().startup;
+        assert_eq!((startup.startup_x, startup.startup_y, startup.startup_width, startup.startup_height),
+            (None, None, None, None));
         assert_eq!(StartupPlacement { startup_height: Some(309), ..Default::default() }.validate(), Err("invalidStartupPlacement"));
     }
 

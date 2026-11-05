@@ -160,11 +160,11 @@ async fn dispatch(app: &AppHandle, request: Request) -> Result<Value, &'static s
                 Ok(json!({ "visible": false }))
             }
             ("device", Some(serial)) => {
-                crate::tray::open_device(app, serial).await?;
+                crate::tray::open_device(app, serial, None).await?;
                 Ok(json!({ "opened": true }))
             }
             ("lock", Some(serial)) => {
-                devices::lock_device(app.clone(), serial).await?;
+                devices::lock_device(app.clone(), serial, None).await?;
                 Ok(json!({ "locked": true }))
             }
             ("exit", None) => Ok(json!({ "exiting": true })),
@@ -173,8 +173,7 @@ async fn dispatch(app: &AppHandle, request: Request) -> Result<Value, &'static s
         Request::Devices => serde_json::to_value(devices::list_devices(app.clone()).await?)
             .map_err(|_| "sessionError"),
         Request::Open { serial } => {
-            let alias = crate::tray::configured_name(app, &serial);
-            let recording = devices::open_device(app.clone(), serial.clone(), alias, None).await?;
+            let recording = crate::tray::open_device(app, serial.clone(), None).await?;
             Ok(json!({ "serial": serial, "recording": recording }))
         }
         Request::Focus { serial } => {
@@ -223,14 +222,15 @@ async fn toolbar(
             height: height.parse().map_err(|_| "invalidArguments")?,
             wechat_insets: false,
         };
-        let title = crate::tray::configured_name(app, serial)
-            .map_or_else(|| package.clone(), |name| format!("{package} · {name}"));
+        let entry = crate::tray::wait_for_device(app, serial, None).await?;
+        let title = format!("{package} · {}", entry.name);
         devices::open_app_window(
             app.clone(),
             serial.to_owned(),
             package.clone(),
             title,
             display,
+            Some(entry.hardware),
         )
         .await?;
         return Ok(json!({ "opened": true }));
