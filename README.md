@@ -44,9 +44,11 @@
 
 ## 单文件发行版
 
-下载[发布页](https://github.com/LeoLiu0813/ScrcpyController/releases)的 `ScrcpyController-v0.1.2-windows-x64.exe`（微软桌面系统 64 位可执行文件）并运行，无需安装控制台或启动开发服务。系统需有 WebView2（微软网页渲染运行库）。投屏使用本机管理的 scrcpy（官方投屏引擎）。首次使用可在「设置 → 投屏引擎更新」安装，也可按下方步骤放入已校验的引擎。通过界面下载安装需要 GnuPG（签名验证工具）。
+下载[发布页](https://github.com/LeoLiu0813/ScrcpyController/releases)的 `ScrcpyController-v0.1.3-windows-x64.exe`（微软桌面系统 64 位可执行文件）并运行，无需安装控制台或启动开发服务。系统需有 WebView2（微软网页渲染运行库）。投屏使用本机管理的 scrcpy（官方投屏引擎）。首次使用可在「设置 → 投屏引擎更新」安装，也可按下方步骤放入已校验的引擎。通过界面下载安装需要 GnuPG（签名验证工具）。
 
 用 `npm run tauri -- build --no-bundle`（构建单文件程序）复现。发行版同一个可执行文件也可带参数使用，例如 `--json tray status`（以结构化格式查询托盘状态）。
+
+正式发行构建额外使用 `--remap-path-prefix`（编译路径替换）将本机构建账户和工作区路径替换为通用路径。公开历史中的提交及版本标签使用平台隐私邮箱，文档效果图使用示例连接信息。
 
 ## 本地开发
 

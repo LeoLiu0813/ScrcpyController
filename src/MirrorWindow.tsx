@@ -847,6 +847,7 @@ export default function MirrorWindow() {
           backgroundInset: getComputedStyle(document.querySelector(".mirror-video")!).paddingLeft, fps,
           fpsDisplay: box(".mirror-toolbar .mirror-fps"), navigation: box(".mirror-toolbar .mirror-list"), railButton: rect(button),
           captionButtons: Array.from(document.querySelectorAll(".mirror-caption-actions .icon-button"), rect),
+          titlebarBounds: box(".mirror-titlebar"), captionBounds: box(".mirror-caption"),
           virtual: !!info?.[4], follow: !!info?.[5], ready,
           title: windowTitle,
           caption: titleCaption,
