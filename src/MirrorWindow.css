@@ -5,17 +5,23 @@
 }
 .mirror-shell.is-fullscreen { border-radius: 0; background: #000; }
 .mirror-titlebar {
-  /* 两侧预留相同宽度，使提示保持在整个标题栏中心。 */
-  display: grid; grid-template-columns: minmax(148px, 1fr) minmax(0, 1.6fr) minmax(148px, 1fr);
-  align-items: center; gap: 6px; flex: 0 0 36px; padding: 0 4px; font-size: 13px; min-width: 0;
+  --caption-button-size: 28px;
+  --caption-actions-width: calc(5 * var(--caption-button-size) + 8px);
+  /* 按钮固定在右侧，提示独立居中，文字变化不再参与按钮的位置计算。 */
+  position: relative; display: flex; align-items: center; flex: 0 0 36px;
+  padding: 0 calc(var(--caption-actions-width) + 10px) 0 4px; font-size: 13px; min-width: 0;
 }
 .mirror-titlebar > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mirror-titlebar > .mirror-device-title { margin-left: 7px; }
-.mirror-titlebar:has(.mirror-caption:empty) { grid-template-columns: minmax(0, 1fr) auto; }
+.mirror-titlebar > .mirror-device-title { flex: 1; max-width: 100%; margin-left: 7px; }
+.mirror-titlebar:has(.mirror-caption:not(:empty)) > .mirror-device-title { max-width: calc(var(--caption-actions-width) - 7px); }
+.mirror-titlebar > .mirror-caption {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  max-width: max(0px, calc(100% - 2 * (var(--caption-actions-width) + 10px)));
+}
 .mirror-titlebar > .mirror-caption:empty { display: none; }
 @container mirror (max-width: 339px) {
   /* 极窄窗口将提示放在按钮左侧，避免文字盖住窗口操作。 */
-  .mirror-titlebar { grid-template-columns: minmax(0, 1fr) auto; }
+  .mirror-titlebar > .mirror-caption { left: 11px; right: calc(var(--caption-actions-width) + 10px); max-width: none; transform: none; }
   .mirror-titlebar:has(.mirror-caption:not(:empty)) > .mirror-device-title { display: none; }
 }
 /* Keep text in the title strip, outside the native video surface. */
@@ -28,7 +34,10 @@
 .mirror-titlebar, .mirror-side {
   background: color-mix(in srgb, var(--theme-panel, #20212b) var(--mirror-opacity), transparent);
 }
-.mirror-caption-actions { display: flex; gap: 2px; margin-left: auto; --caption-button-size: 28px; }
+.mirror-caption-actions {
+  position: absolute; top: 4px; right: 4px; display: flex; gap: 2px;
+  width: var(--caption-actions-width);
+}
 .mirror-caption-actions .icon-button {
   width: var(--caption-button-size); min-width: var(--caption-button-size); height: var(--caption-button-size);
   padding: 0; border: 1px solid transparent;

@@ -16,7 +16,7 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::{
         ChildWindowFromPointEx, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, GWL_STYLE, GetAncestor, GA_ROOT, GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO, GetParent, GetWindowRect, SetCursorPos, WindowFromPoint, IsChild, IsWindowVisible, IsIconic, GetWindowLongPtrW, HWND_TOP, IsWindow, PostMessageW,
         SW_HIDE, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetParent, SetWindowLongPtrW,
-        SetWindowPos, ShowWindowAsync, WM_APP, WM_CLOSE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_MOUSEMOVE, WM_NCDESTROY, WM_SETFOCUS, WM_WINDOWPOSCHANGED, WM_KEYDOWN, WM_KEYUP, WS_CHILD, WS_POPUP,
+        SetWindowPos, ShowWindowAsync, WM_APP, WM_CLOSE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_NCDESTROY, WM_SETFOCUS, WM_WINDOWPOSCHANGED, WM_KEYDOWN, WM_KEYUP, WS_CHILD, WS_POPUP,
     },
 };
 
@@ -217,7 +217,27 @@ fn input_snapshot(host: HWND, video: HWND) -> InputSnapshot {
 
 fn log_input(event: &'static str, host: HWND, video: HWND) {
     if !crate::control_log::enabled() || unsafe { GetForegroundWindow() } != host { return; }
-    crate::control_log::record(event, Some(&log_session(host)), serde_json::to_value(input_snapshot(host, video)).unwrap_or_default());
+    let mut detail = serde_json::to_value(input_snapshot(host, video)).unwrap_or_default();
+    if matches!(event, "focus.restore_started" | "focus.restore_completed") {
+        let mut pointer = POINT::default();
+        let mut rect = RECT::default();
+        let in_scope = unsafe { GetCursorPos(&mut pointer) != 0 && {
+            let hit = WindowFromPoint(pointer);
+            hit == host || IsChild(host, hit) != 0
+        } };
+        let sampled = in_scope && unsafe { ScreenToClient(video, &mut pointer) != 0 && GetClientRect(video, &mut rect) != 0 };
+        detail["pointer_in_scope"] = serde_json::json!(in_scope);
+        detail["pointer_sampled"] = serde_json::json!(sampled);
+        // 这里仍是系统客户区坐标，并未观察播放器实际消费的事件。
+        detail["player_processing_observed"] = serde_json::json!(false);
+        if sampled {
+            detail["video_x"] = serde_json::json!(pointer.x);
+            detail["video_y"] = serde_json::json!(pointer.y);
+            detail["video_width"] = serde_json::json!(rect.right);
+            detail["video_height"] = serde_json::json!(rect.bottom);
+        }
+    }
+    crate::control_log::record(event, Some(&log_session(host)), detail);
 }
 
 #[derive(Clone)]
@@ -771,16 +791,11 @@ fn focus_video(host: HWND, video: HWND) -> bool {
 pub(crate) async fn prepare_input(shell: WebviewWindow, video: usize) -> Result<bool, &'static str> {
     let host = shell.hwnd().map_err(|_| "mirrorFrameFailed")?.0 as usize;
     let (send, receive) = std::sync::mpsc::sync_channel(1);
-    shell.run_on_main_thread(move || unsafe {
+    shell.run_on_main_thread(move || {
         let video = video as HWND;
         let focused = focus_video(host as HWND, video);
-        if focused {
-            let mut rect = RECT::default();
-            if GetClientRect(video, &mut rect) != 0 {
-                let point = ((rect.bottom / 2) << 16) | (rect.right / 2);
-                PostMessageW(video, WM_MOUSEMOVE, 0, point as isize);
-            }
-        }
+        // 仅恢复焦点，不伪造鼠标移动。播放器的按钮事件使用最近一次移动
+        // 保存的坐标；向画面中心发送移动会把下一次真实点击或拖动带偏。
         let _ = send.send(focused);
     }).map_err(|_| "mirrorFrameFailed")?;
     tauri::async_runtime::spawn_blocking(move || receive.recv_timeout(std::time::Duration::from_millis(800)))
