@@ -320,6 +320,15 @@ async fn toolbar(
         devices::cli_click_video(&window, x, y)?;
         return Ok(json!({ "x": x, "y": y }));
     }
+    if operation == "click-pointer" {
+        if !args.is_empty() { return Err("invalidArguments"); }
+        let [x, y] = devices::cli_click_pointer(&window)?;
+        return Ok(json!({ "x": x, "y": y }));
+    }
+    if operation == "release-modifiers" {
+        if !args.is_empty() { return Err("invalidArguments"); }
+        return devices::cli_release_modifiers(&window);
+    }
     if operation == "click-toolbar" {
         let [x, y] = args.as_slice() else {
             return Err("invalidArguments");

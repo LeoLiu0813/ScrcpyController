@@ -32,6 +32,8 @@ const HELP: &str = "安卓控制台命令行\n\
     成功表示系统输入已注入，手机页面效果需要另行核对。\n\
   toolbar <设备序列号> click-toolbar <横坐标> <纵坐标>  真实点击前台投屏窗口工具栏\n\
     坐标为宿主客户区物理像素，点击目标须位于外框控件且不属于手机画面。\n\
+  toolbar <设备序列号> click-pointer  原地点击当前投屏位置，可激活窗口，不移动光标\n\
+  toolbar <设备序列号> release-modifiers  同步物理已松开的修饰键\n\
   tray <status|show|hide|device|lock|exit>  托盘状态与操作\n\
   logs <status|tail|enable|disable|export|show>  控制日志：状态、查看、开启、关闭、导出、显示页面\n\
   logs tail [条数]                 查看最近日志，最多一千条，结果过长会截取\n\

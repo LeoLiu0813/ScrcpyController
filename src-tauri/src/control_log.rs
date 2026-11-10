@@ -135,7 +135,8 @@ fn safe_string(value: &str) -> bool {
         "deviceUnavailable" | "deviceIdentityMismatch" | "deviceVerifying" | "controlLogFailed" |
         "appWindowFailed" | "appWindowUnavailable" | "launchFailed" | "engineMissing" |
         "readOnly" | "position" | "geometry" | "attached" | "detached" |
-        "foreground" | "background" | "visible" | "hidden" | "no_focus" | "not_foreground"
+        "foreground" | "background" | "visible" | "hidden" | "no_focus" | "not_foreground" |
+        "poll" | "activated" | "deactivated" | "manual"
         | "unknown"
     ) || value.len() == 1 && value.as_bytes()[0].is_ascii_uppercase()
         || value == env!("CARGO_PKG_VERSION")

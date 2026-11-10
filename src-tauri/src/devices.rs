@@ -737,6 +737,19 @@ pub(crate) fn cli_press_key(window: &tauri::WebviewWindow, key: &str) -> Result<
     crate::mirror::press_key(window, &mirror, key)
 }
 
+pub(crate) fn cli_release_modifiers(window: &tauri::WebviewWindow) -> Result<serde_json::Value> {
+    let (_, _, target) = mirror_session(window)?;
+    target.check(&engine(window.app_handle())?)?;
+    let host = window.hwnd().map_err(|_| "mirrorFrameFailed")?.0 as HWND;
+    serde_json::to_value(crate::input_state::synchronize(host, "manual", true)).map_err(|_| "mirrorActionFailed")
+}
+
+pub(crate) fn cli_click_pointer(window: &tauri::WebviewWindow) -> Result<[i32; 2]> {
+    let (_, mirror, target) = mirror_session(window)?;
+    target.check(&engine(window.app_handle())?)?;
+    crate::mirror::click_pointer(window, &mirror)
+}
+
 pub(crate) fn cli_video_geometry(window: &tauri::WebviewWindow) -> Result<serde_json::Value> {
     let (_, mirror, _) = mirror_session(window)?;
     let mut geometry = crate::mirror::geometry(window, mirror.window())?;

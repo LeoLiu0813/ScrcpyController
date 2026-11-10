@@ -16,7 +16,7 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::{
         ChildWindowFromPointEx, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, GWL_STYLE, GetAncestor, GA_ROOT, GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO, GetParent, GetWindowRect, SetCursorPos, WindowFromPoint, IsChild, IsWindowVisible, IsIconic, GetWindowLongPtrW, HWND_TOP, IsWindow, PostMessageW,
         SW_HIDE, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetParent, SetWindowLongPtrW,
-        SetWindowPos, ShowWindowAsync, WM_APP, WM_CLOSE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_NCDESTROY, WM_SETFOCUS, WM_WINDOWPOSCHANGED, WM_KEYDOWN, WM_KEYUP, WS_CHILD, WS_POPUP,
+        SetWindowPos, ShowWindowAsync, WM_APP, WM_CLOSE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_MOUSEACTIVATE, WM_NCDESTROY, WM_SETFOCUS, WM_WINDOWPOSCHANGED, WM_KEYDOWN, WM_KEYUP, WS_CHILD, WS_POPUP,
     },
 };
 
@@ -483,6 +483,17 @@ pub(crate) fn create(app: &AppHandle, mirror: &Mirror, title: &str) -> Result<()
         "virtual_screen": mirror.options.virtual_screen, "control_enabled": mirror.options.control_enabled,
         "follow": mirror.options.follow, "width": mirror.original_size.0, "height": mirror.original_size.1,
     }));
+    if !attach(mirror.window(), host) {
+        crate::control_log::record("mirror.attach_failed", Some(&session), serde_json::json!({}));
+        let _ = shell.destroy();
+        return Err("mirrorFrameFailed");
+    }
+    crate::control_log::record("mirror.attached", Some(&session), serde_json::json!({}));
+    let Some(input_generation) = crate::input_state::register(host as usize, video, session.clone()) else {
+        unsafe { PostMessageW(video as HWND, WM_CLOSE, 0, 0); }
+        let _ = shell.destroy();
+        return Err("mirrorFrameFailed");
+    };
     let window_session = session.clone();
     let host_id = host as usize;
     shell.on_window_event(move |event| {
@@ -498,15 +509,12 @@ pub(crate) fn create(app: &AppHandle, mirror: &Mirror, title: &str) -> Result<()
             {
                 sessions.remove(&host_id);
             }
-            if matches!(event, WindowEvent::Destroyed) { crate::mouse_trace::unregister(host_id); }
+            if matches!(event, WindowEvent::Destroyed) {
+                crate::mouse_trace::unregister(host_id);
+                crate::input_state::unregister(host_id, input_generation);
+            }
         }
     });
-    if !attach(mirror.window(), host) {
-        crate::control_log::record("mirror.attach_failed", Some(&session), serde_json::json!({}));
-        let _ = shell.destroy();
-        return Err("mirrorFrameFailed");
-    }
-    crate::control_log::record("mirror.attached", Some(&session), serde_json::json!({}));
     let tracing = crate::mouse_trace::register(host as usize, video, session.clone());
     crate::control_log::record("input.trace_registered", Some(&session), serde_json::json!({ "success": tracing }));
     install_move_handler(&shell, host, video)?;
@@ -522,6 +530,9 @@ pub(crate) fn create(app: &AppHandle, mirror: &Mirror, title: &str) -> Result<()
         while unsafe { IsWindow(video as HWND) } != 0 {
             let foreground = unsafe { GetForegroundWindow() };
             let active = foreground == host as HWND;
+            let changed = was_active != active;
+            let input_sync = crate::input_state::synchronize_owned(host as HWND, input_generation,
+                if changed { if active { "activated" } else { "deactivated" } } else { "poll" }, changed);
             if !foreground.is_null() || unsafe { IsIconic(host as HWND) } != 0 {
                 if was_active && !active {
                     let _ = app.emit_to(&label, &format!("mirror-blur-{label}"), ());
@@ -547,10 +558,12 @@ pub(crate) fn create(app: &AppHandle, mirror: &Mirror, title: &str) -> Result<()
             {
                 let _ = correct_video_bounds(host as HWND, video as HWND, bounds);
             }
-            std::thread::sleep(std::time::Duration::from_millis(if active { 35 } else { 200 }));
+            // 修饰键仍按下时，后台也保持快速采样，接住发给其他窗口的抬起。
+            std::thread::sleep(std::time::Duration::from_millis(if active || input_sync.system_modifiers != 0 { 35 } else { 200 }));
         }
         crate::control_log::record("mirror.closed", Some(&session), serde_json::json!({}));
         crate::mouse_trace::unregister(host);
+        crate::input_state::unregister(host, input_generation);
         if let Some(window) = app.get_webview_window(&label) {
             let _ = window.destroy();
         }
@@ -701,13 +714,15 @@ pub(crate) fn shortcut(video: HWND, key: usize, scan: usize, shift: bool, extend
     let operation = NEXT_INPUT_OPERATION.fetch_add(1, Ordering::Relaxed);
     crate::control_log::record("shortcut.started", Some(&session), serde_json::json!({ "operation": operation, "key_code": key, "shift": shift }));
     log_input("shortcut.input_before", host, video);
-    let ctrl_down = post(video, &session, operation, true, 0x11, 0x1d, true);
-    let shift_down = !shift || post(video, &session, operation, true, 0x10, 0x2a, false);
-    let key_down = post(video, &session, operation, true, key, scan, extended);
-    let key_up = post(video, &session, operation, false, key, scan, extended);
-    let shift_up = !shift || post(video, &session, operation, false, 0x10, 0x2a, false);
-    let ctrl_up = post(video, &session, operation, false, 0x11, 0x1d, true);
-    let success = ctrl_down && shift_down && key_down && key_up && shift_up && ctrl_up;
+    let success = crate::input_state::serialize(host, video, || {
+        let ctrl_down = post(video, &session, operation, true, 0x11, 0x1d, true);
+        let shift_down = !shift || post(video, &session, operation, true, 0x10, 0x2a, false);
+        let key_down = post(video, &session, operation, true, key, scan, extended);
+        let key_up = post(video, &session, operation, false, key, scan, extended);
+        let shift_up = !shift || post(video, &session, operation, false, 0x10, 0x2a, false);
+        let ctrl_up = post(video, &session, operation, false, 0x11, 0x1d, true);
+        ctrl_down && shift_down && key_down && key_up && shift_up && ctrl_up
+    })?;
     // 成功仅表示消息已入队，不表示播放器已经处理。
     crate::control_log::record("shortcut.completed", Some(&session), serde_json::json!({ "operation": operation, "queued": success }));
     log_input("shortcut.input_after", host, video);
@@ -767,6 +782,7 @@ fn focus_video(host: HWND, video: HWND) -> bool {
             crate::control_log::record("focus.restore_skipped", Some(&log_session(host)), serde_json::json!({}));
             return false;
         }
+        crate::input_state::synchronize(host, "focus", true);
         if focused_child() != video {
             let current_thread = GetCurrentThreadId();
             let video_thread = GetWindowThreadProcessId(video, std::ptr::null_mut());
@@ -809,6 +825,10 @@ fn install_move_handler(shell: &WebviewWindow, host: HWND, video: usize) -> Resu
     unsafe extern "system" fn on_message(
         host: HWND, message: u32, wparam: usize, lparam: isize, id: usize, video: usize,
     ) -> isize {
+        if message == WM_MOUSEACTIVATE || message == WM_SETFOCUS {
+            // 在原生激活流程中先排入抬起，再交给外框处理；不等前端异步恢复。
+            crate::input_state::synchronize(host, "host_message", true);
+        }
         if message == WM_ENTERSIZEMOVE {
             log_input("mirror.move_started", host, video as HWND);
         } else if message == WM_EXITSIZEMOVE || message == WM_DPICHANGED {
@@ -1017,6 +1037,23 @@ pub(crate) fn click_video(window: &WebviewWindow, mirror: &Mirror, x: i32, y: i3
         }
     }
     Ok(())
+}
+
+pub(crate) fn click_pointer(window: &WebviewWindow, mirror: &Mirror) -> Result<[i32; 2], &'static str> {
+    if !mirror.options.control_enabled { return Err("mirrorActionFailed"); }
+    let host = window.hwnd().map_err(|_| "mirrorFrameFailed")?.0 as HWND;
+    let video = mirror.window();
+    let mut point = POINT::default();
+    unsafe {
+        if GetParent(video) != host || IsWindowVisible(video) == 0
+            || GetCursorPos(&mut point) == 0 || WindowFromPoint(point) != video
+        { return Err("focusDenied"); }
+        if ScreenToClient(video, &mut point) == 0 { return Err("mirrorFrameFailed"); }
+        if !send_mouse(MOUSEEVENTF_LEFTDOWN) { return Err("mirrorActionFailed"); }
+        std::thread::sleep(std::time::Duration::from_millis(55));
+        if !send_mouse(MOUSEEVENTF_LEFTUP) { return Err("mirrorActionFailed"); }
+    }
+    Ok([point.x, point.y])
 }
 
 pub(crate) fn click_toolbar(window: &WebviewWindow, mirror: &Mirror, x: i32, y: i32) -> Result<(), &'static str> {

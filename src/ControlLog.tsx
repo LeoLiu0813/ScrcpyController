@@ -43,6 +43,7 @@ const eventLabels: Record<string, Message> = {
   "mirror.move_ended": "controlLogMoveEnded",
   "mirror.resized": "controlLogResized",
   "input.sample_changed": "controlLogInputSample",
+  "input.modifiers_synchronized": "controlLogModifiersSynchronized",
   "input.pointer_move": "controlLogPointerMove",
   "input.pointer_button": "controlLogPointerButton",
   "input.pointer_wheel": "controlLogPointerWheel",

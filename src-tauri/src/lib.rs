@@ -10,6 +10,7 @@ mod cli_server;
 mod tray;
 mod control_log;
 mod mouse_trace;
+mod input_state;
 
 pub fn run() {
     tauri::Builder::default()
