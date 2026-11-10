@@ -1,6 +1,6 @@
 [package]
 name = "tauri-app"
-version = "0.2.1"
+version = "0.2.2"
 description = "安卓控制台，本地多设备投屏与控制"
 authors = ["LeoLiu0813"]
 edition = "2024"
